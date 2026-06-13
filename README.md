@@ -38,7 +38,7 @@ git clone https://github.com/H00380243/code-doc-consistency.git ~/code-doc-consi
 ### Option 2 — From a Git remote (once published)
 
 ```bash
-/plugin marketplace add https://github.com/H00380243/code-doc-consistency
+/plugin marketplace add H00380243/code-doc-consistency
 /plugin install code-doc-consistency
 ```
 
