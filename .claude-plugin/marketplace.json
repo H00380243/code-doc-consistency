@@ -1,0 +1,15 @@
+{
+  "name": "code-doc-consistency",
+  "metadata": {
+    "description": "Code-vs-design-doc consistency checker. Builds two directed-graph RAGs (code + docs) in parallel, then runs four-layer diff analysis to find drift."
+  },
+  "owner": {
+    "name": "H00380243"
+  },
+  "plugins": [
+    {
+      "name": "code-doc-consistency",
+      "source": "./code-doc-consistency-plugin"
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+# .gitignore
+
+# Workspace artifacts (intermediate graph builds, alignment, reviews)
+_workspace/
+_workspace_*/
+
+# Generated reports
+consistency_report.md
+consistency_report.json
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Node — only relevant if anyone adds tooling later
+node_modules/
+*.log

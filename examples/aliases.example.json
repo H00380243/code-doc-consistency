@@ -1,0 +1,15 @@
+{
+  "$comment": "Sample alias map. Keys are code-side node IDs; values are doc-side IDs they should align to. Use a list value when one code entity matches multiple doc entities (rare).",
+
+  "class:src/models/user.py:User": "schema:User",
+
+  "function:src/handlers/login.py:handler": ["endpoint:POST:/api/login"],
+
+  "class:src/db/users.py:UserRepository": "module:UserRepo",
+
+  "$comment_when_to_use": [
+    "When code uses path-prefixed IDs and docs use bare names (function:src/auth/login.py:handler ↔ endpoint:POST:/api/login)",
+    "When an entity changed name across the boundary (User class is described as UserRepo in the design doc)",
+    "When two entities have identical normalized names but represent different concepts (force the right pairing)"
+  ]
+}

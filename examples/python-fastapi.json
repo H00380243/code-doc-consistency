@@ -1,0 +1,18 @@
+{
+  "$comment": "Python FastAPI service: code in src/, OpenAPI spec auto-generated, manually-maintained architecture docs in docs/.",
+  "code": {
+    "root": "src"
+  },
+  "docs": {
+    "roots": [
+      "docs/",
+      "openapi.yaml",
+      "README.md"
+    ]
+  },
+  "output": {
+    "path": "consistency_report.md"
+  },
+  "focus": null,
+  "aliases": null
+}

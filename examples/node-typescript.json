@@ -1,0 +1,17 @@
+{
+  "$comment": "Node/TypeScript backend. Code in src/, docs as Markdown architecture overview + embedded mermaid diagrams.",
+  "code": {
+    "root": "src"
+  },
+  "docs": {
+    "roots": [
+      "docs/architecture.md",
+      "docs/api/",
+      "README.md"
+    ]
+  },
+  "output": {
+    "path": "docs/.consistency-report.md"
+  },
+  "aliases": "code-doc-aliases.json"
+}

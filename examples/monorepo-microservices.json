@@ -1,0 +1,17 @@
+{
+  "$comment": "Microservices monorepo. Each /cdc invocation focuses one service via --scope. Run multiple times for different services. Top-level docs/ holds shared architecture; per-service README and proto files live next to the code.",
+  "code": {
+    "root": "services"
+  },
+  "docs": {
+    "roots": [
+      "docs/",
+      "services/auth/proto/",
+      "services/billing/proto/"
+    ]
+  },
+  "output": {
+    "path": "audit/consistency_report.md"
+  },
+  "$comment_usage": "Run with --scope=auth or --scope=billing to limit code-side analysis to one service while keeping all proto files in scope as shared contract."
+}

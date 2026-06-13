@@ -1,0 +1,16 @@
+{
+  "$comment": "Limit the consistency check to API-layer drift only. Skip the noise of internal helpers vs incomplete docs. Useful for projects where 90% of code is intentionally undocumented and only the API contract matters.",
+  "code": {
+    "root": "src"
+  },
+  "docs": {
+    "roots": [
+      "openapi.yaml",
+      "docs/api/"
+    ]
+  },
+  "output": {
+    "path": "api-consistency-report.md"
+  },
+  "focus": "endpoint,routes_to,defines_schema,api_endpoint,schema"
+}
