@@ -3,10 +3,10 @@
   "description": "Detect inconsistencies between source code and design documents using parallel directed-graph RAG. Builds two graphs (code AST + design specs) in parallel, then runs four-layer diff analysis (entities, relations, attributes, behavior).",
   "version": "0.1.0",
   "author": {
-    "name": "TBD"
+    "name": "H00380243"
   },
-  "homepage": "https://github.com/TBD/code-doc-consistency",
-  "repository": "https://github.com/TBD/code-doc-consistency",
+  "homepage": "https://github.com/H00380243/code-doc-consistency",
+  "repository": "https://github.com/H00380243/code-doc-consistency",
   "license": "MIT",
   "keywords": [
     "code-doc-consistency",

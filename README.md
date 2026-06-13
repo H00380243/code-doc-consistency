@@ -26,10 +26,10 @@ A Claude Code plugin that builds two graphs — one from your code (AST + import
 
 ```bash
 # Clone the repo somewhere Claude Code can read
-git clone https://github.com/TBD/code-doc-consistency.git ~/code-doc-consistency
+git clone https://github.com/H00380243/code-doc-consistency.git ~/code-doc-consistency
 
 # Inside Claude Code, register as a local marketplace
-/plugin marketplace add ~/code-doc-consistency
+/plugin marketplace add H00380243/code-doc-consistency
 
 # Install
 /plugin install code-doc-consistency
@@ -38,7 +38,7 @@ git clone https://github.com/TBD/code-doc-consistency.git ~/code-doc-consistency
 ### Option 2 — From a Git remote (once published)
 
 ```bash
-/plugin marketplace add https://github.com/TBD/code-doc-consistency
+/plugin marketplace add https://github.com/H00380243/code-doc-consistency
 /plugin install code-doc-consistency
 ```
 
