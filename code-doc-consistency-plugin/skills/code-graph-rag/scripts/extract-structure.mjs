@@ -555,16 +555,54 @@ function analyzeFile(file, projectRoot) {
 }
 
 function main() {
-  const [, , inputPath, outputPath] = process.argv;
+  const argv = process.argv.slice(2);
+  const positional = [];
+  let batchIndex = null;
+  let projectRootOverride = null;
+  for (const a of argv) {
+    if (a.startsWith('--batch=')) batchIndex = Number.parseInt(a.slice('--batch='.length), 10);
+    else if (a.startsWith('--project-root=')) projectRootOverride = a.slice('--project-root='.length);
+    else positional.push(a);
+  }
+  const [inputPath, outputPath] = positional;
   if (!inputPath || !outputPath) {
-    process.stderr.write('Usage: node extract-structure.mjs <input.json> <output.json>\n');
+    process.stderr.write(
+      'Usage: node extract-structure.mjs <input.json> <output.json> [--batch=<i>] [--project-root=<path>]\n' +
+      '  Input may be either:\n' +
+      '    (a) {projectRoot, batchFiles[]} (legacy single-batch input), or\n' +
+      '    (b) full 01_code_batches.json + --batch=<i> + --project-root=<path>\n'
+    );
     process.exit(1);
   }
   const input = JSON.parse(readFileSync(inputPath, 'utf-8'));
-  const { projectRoot, batchFiles } = input;
-  if (!projectRoot || !Array.isArray(batchFiles)) {
-    process.stderr.write('Error: input must contain projectRoot + batchFiles\n');
-    process.exit(1);
+
+  let projectRoot;
+  let batchFiles;
+  if (Number.isInteger(batchIndex)) {
+    // Mode (b): pluck the requested batch out of a 01_code_batches.json-shaped file.
+    if (!Array.isArray(input.batches)) {
+      process.stderr.write('Error: --batch=<i> requires input to contain `batches[]`\n');
+      process.exit(1);
+    }
+    const batch = input.batches[batchIndex];
+    if (!batch) {
+      process.stderr.write(`Error: batchIndex ${batchIndex} out of range (0..${input.batches.length - 1})\n`);
+      process.exit(1);
+    }
+    batchFiles = batch.batchFiles;
+    projectRoot = projectRootOverride || input.projectRoot;
+    if (!projectRoot || !Array.isArray(batchFiles)) {
+      process.stderr.write('Error: cannot resolve projectRoot/batchFiles for that batch — pass --project-root=<path>\n');
+      process.exit(1);
+    }
+  } else {
+    // Mode (a): legacy single-batch input.
+    ({ projectRoot, batchFiles } = input);
+    if (projectRootOverride) projectRoot = projectRootOverride;
+    if (!projectRoot || !Array.isArray(batchFiles)) {
+      process.stderr.write('Error: input must contain projectRoot + batchFiles (or use --batch=<i> with a 01_code_batches.json file)\n');
+      process.exit(1);
+    }
   }
 
   const results = []; const filesSkipped = [];

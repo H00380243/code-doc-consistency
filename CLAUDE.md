@@ -10,7 +10,7 @@ This file is loaded into Claude Code when working **on the plugin itself** (not 
 │   └── marketplace.json              # Marketplace entry pointing at the plugin sub-dir
 ├── code-doc-consistency-plugin/      # The actual plugin
 │   ├── .claude-plugin/plugin.json    # Plugin metadata (version, author, etc.)
-│   ├── agents/                       # 4 subagent definitions
+│   ├── agents/                       # 6 subagent definitions (2 coordinators + 2 workers + reviewer + checker)
 │   ├── skills/                       # 4 skills (1 orchestrator + 3 building blocks)
 │   └── commands/cdc.md               # /cdc slash command
 ├── examples/                         # Drop-in configs users can copy to their projects
@@ -31,15 +31,31 @@ This file is loaded into Claude Code when working **on the plugin itself** (not 
    ↓
 [code-doc-consistency-orchestrator skill]
    ↓
-   ├── [code-graph-builder agent]   ─┐ parallel subagents
-   ├── [doc-graph-builder agent]    ─┘
+   ├── [code-graph-builder coordinator]      ─┐ Phase 2a 并行（确定性）
+   │     └── SCAN / BATCH / extract-structure │
+   ├── [doc-graph-builder  coordinator]      ─┘ DISCOVER / STRUCTURED
+   ↓
+   ├── [code-batch-analyzer × N]   ─┐ Phase 2b fan-out（LLM 并行 N+M 个）
+   ├── [doc-freetext-analyzer × M] ─┘
+   ↓
+   ├── [code-graph-builder coordinator]      ─┐ Phase 2c 并行（确定性）
+   ├── [doc-graph-builder  coordinator]      ─┘ MERGE / REVIEW
    ↓
    ├── [graph-reviewer agent]      schema/integrity QA
    ↓
    └── [consistency-checker agent]  4-layer diff
 ```
 
-Each builder runs a 5-stage deterministic pipeline (SCAN → BATCH → ANALYZE → MERGE → REVIEW) where bundled `.mjs` scripts handle every formalizable step and the LLM only adds semantic judgments.
+确定性脚本（SCAN / BATCH / extract-structure / discover-docs / extract-doc-structure / MERGE / validate）由 coordinator 直接执行；LLM 语义合成（per-batch summary/tags/edges、per-markdown 实体抽取）拆给 N+M 个 worker subagent 并行处理，wall-clock 受限于最慢的单批/单文档 + 调度并发上限（≈ 16）。
+
+| Component | Type | Role |
+|-----------|------|------|
+| `code-graph-builder` | coordinator agent | 跑代码侧确定性阶段 + 合并；不做 ANALYZE |
+| `code-batch-analyzer` | worker agent | 单 batch 的 LLM 语义合成 |
+| `doc-graph-builder` | coordinator agent | 跑文档侧确定性阶段 + 合并；不做 FREETEXT |
+| `doc-freetext-analyzer` | worker agent | 单 markdown 的 LLM 抽取 |
+| `graph-reviewer` | agent | schema / 引用 / 跨图 ID QA |
+| `consistency-checker` | agent | 四层 diff |
 
 ## Versioning
 
@@ -58,3 +74,4 @@ Smoke test: build a tiny fixture project (a few `.py` files + an OpenAPI YAML), 
 | 2026-06-12 | Ported deterministic scripts as zero-dep Node lite versions |
 | 2026-06-12 | Added input resolution mechanism (resolve-inputs.mjs + config schema + priority chain) |
 | 2026-06-12 | Repackaged as standard Claude Code plugin (marketplace + sub-plugin layout, /cdc command, examples/) |
+| 2026-06-14 | **v0.2** — Split each builder into coordinator + worker fan-out: `code-batch-analyzer` and `doc-freetext-analyzer` workers run in parallel (N+M subagents) so ANALYZE/FREETEXT wall-clock drops from serial-per-batch to single-batch + scheduling. Builders become coordinators that only run deterministic phases and merge results. |

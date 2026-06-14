@@ -11,7 +11,14 @@
  * dangling edges, and fixes inverted tested_by direction.
  *
  * Usage:
- *   node merge-batch-graphs.mjs <batch-dir> <output-path> [--side=code|design]
+ *   node merge-batch-graphs.mjs <batch-dir> <output-path> [--side=code|design] [--pattern=<glob>,<glob>]
+ *
+ * --pattern accepts comma-separated glob-lite patterns (only `*` wildcard supported).
+ * Examples:
+ *   --pattern="01_code_batch_*.json"                          (only code-side worker outputs)
+ *   --pattern="02_doc_structured_*.json,02_doc_freetext_*.json" (combine doc structured + freetext)
+ *
+ * Without --pattern, defaults to legacy batch-<n>[-part-<m>].json + batch-existing.json.
  */
 
 import { readdirSync, readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
@@ -168,10 +175,24 @@ function fixupTestedBy(edges) {
   return { edges: out, flipped, dropped };
 }
 
-function findBatchFiles(dir) {
+function findBatchFiles(dir, customPatterns) {
   const files = [];
+  const allEntries = readdirSync(dir).sort();
+
+  if (customPatterns && customPatterns.length) {
+    // Treat each pattern as a glob-lite (only `*` wildcard supported).
+    const regexes = customPatterns.map(p =>
+      new RegExp('^' + p.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*') + '$')
+    );
+    for (const f of allEntries) {
+      if (regexes.some(re => re.test(f))) files.push(join(dir, f));
+    }
+    return files;
+  }
+
+  // Default behavior: batch-<n>[-part-<m>].json + batch-existing.json
   const re = /^batch-(\d+)(?:-part-(\d+))?\.json$/;
-  for (const f of readdirSync(dir).sort()) {
+  for (const f of allEntries) {
     if (re.test(f)) files.push(join(dir, f));
   }
   const existing = join(dir, 'batch-existing.json');
@@ -181,17 +202,29 @@ function findBatchFiles(dir) {
 
 function main() {
   const args = process.argv.slice(2);
-  const [batchDir, outPath] = args;
+  const positional = [];
   let side = 'code';
-  for (const a of args.slice(2)) if (a.startsWith('--side=')) side = a.slice(7);
+  let patterns = null;
+  for (const a of args) {
+    if (a.startsWith('--side=')) side = a.slice('--side='.length);
+    else if (a.startsWith('--pattern=')) {
+      patterns = a.slice('--pattern='.length).split(',').map(p => p.trim()).filter(Boolean);
+    } else positional.push(a);
+  }
+  const [batchDir, outPath] = positional;
   if (!batchDir || !outPath) {
-    process.stderr.write('Usage: node merge-batch-graphs.mjs <batch-dir> <output-path> [--side=code|design]\n');
+    process.stderr.write(
+      'Usage: node merge-batch-graphs.mjs <batch-dir> <output-path> [--side=code|design] [--pattern=<glob>,<glob>]\n' +
+      '  --pattern lets you merge files matching specific names (e.g. "01_code_batch_*.json").\n' +
+      '  Without --pattern, defaults to batch-<n>[-part-<m>].json + batch-existing.json.\n'
+    );
     process.exit(1);
   }
 
-  const batchFiles = findBatchFiles(batchDir);
+  const batchFiles = findBatchFiles(batchDir, patterns);
   if (!batchFiles.length) {
-    process.stderr.write(`merge-batch-graphs: no batch-*.json found in ${batchDir}\n`);
+    const hint = patterns ? `matching ${patterns.join(',')}` : 'batch-*.json';
+    process.stderr.write(`merge-batch-graphs: no files ${hint} found in ${batchDir}\n`);
     process.exit(1);
   }
 

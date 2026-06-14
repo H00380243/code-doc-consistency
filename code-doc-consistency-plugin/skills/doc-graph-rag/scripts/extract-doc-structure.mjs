@@ -444,10 +444,28 @@ function processDocument(doc, projectRoot) {
   return { source: doc.path, docType: doc.docType, nodes: result.nodes, edges: result.edges };
 }
 
+function sanitizeSlug(p) {
+  return p.replace(/[\\/]/g, '_').replace(/\.[^.]+$/, '').replace(/[^A-Za-z0-9._-]/g, '_');
+}
+
 function main() {
-  const [, , inputPath, outputPath] = process.argv;
+  const argv = process.argv.slice(2);
+  const positional = [];
+  let split = false;
+  let outputPrefix = '02_doc_structured_';
+  for (const a of argv) {
+    if (a === '--split') split = true;
+    else if (a.startsWith('--output-prefix=')) outputPrefix = a.slice('--output-prefix='.length);
+    else positional.push(a);
+  }
+  const [inputPath, outputPath] = positional;
   if (!inputPath || !outputPath) {
-    process.stderr.write('Usage: node extract-doc-structure.mjs <input.json> <output.json>\n');
+    process.stderr.write(
+      'Usage: node extract-doc-structure.mjs <input.json> <output> [--split] [--output-prefix=<pfx>]\n' +
+      '  Default: writes a single bundled JSON to <output> (a file path).\n' +
+      '  --split: writes one JSON per non-markdown doc to <output>/<prefix><slug>.json (treats <output> as a directory).\n' +
+      '          The per-file shape ({source, docType, nodes, edges}) is what merge-batch-graphs.mjs --pattern expects.\n'
+    );
     process.exit(1);
   }
   const input = JSON.parse(readFileSync(inputPath, 'utf-8'));
@@ -455,6 +473,29 @@ function main() {
   if (!projectRoot || !Array.isArray(documents)) {
     process.stderr.write('Error: input must contain projectRoot + documents\n');
     process.exit(1);
+  }
+
+  if (split) {
+    mkdirSync(outputPath, { recursive: true });
+    let written = 0; let totalNodes = 0; let totalEdges = 0;
+    for (const doc of documents) {
+      // Skip markdown — those go to FREETEXT workers, not structured parser.
+      if (doc.docType === 'markdown' || doc.docType === 'binary') continue;
+      const r = processDocument(doc, projectRoot);
+      if (r.error) {
+        process.stderr.write(`Warning: extract-doc-structure: ${doc.path} — ${r.error}\n`);
+        continue;
+      }
+      const fileName = `${outputPrefix}${sanitizeSlug(doc.path)}.json`;
+      writeFileSync(join(outputPath, fileName), JSON.stringify(r, null, 2));
+      written++;
+      totalNodes += r.nodes.length;
+      totalEdges += r.edges.length;
+    }
+    process.stderr.write(
+      `extract-doc-structure (split): wrote ${written} files, totalNodes=${totalNodes} totalEdges=${totalEdges}\n`
+    );
+    return;
   }
 
   const results = [];

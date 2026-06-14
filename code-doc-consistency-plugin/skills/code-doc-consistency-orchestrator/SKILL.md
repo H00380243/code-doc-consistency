@@ -1,29 +1,37 @@
 ---
 name: code-doc-consistency-orchestrator
-description: "代码与设计文档一致性检测的 orchestrator。借鉴 Understand-Anything 的五阶段流水线（SCAN→BATCH→ANALYZE→MERGE→REVIEW），四个 subagent 协作：code-graph-builder 与 doc-graph-builder 并行构建图谱，graph-reviewer 做 schema 校验，consistency-checker 做四层次差异分析。一致性检测、设计漂移分析、文档同步审计、代码-文档对账、API 契约比对、'代码和文档对得上吗'、再次执行/重跑/更新一致性报告/部分重检/补充扫描/聚焦某模块、增量审计、refresh consistency report 等任务时必须使用本技能。"
+description: "代码与设计文档一致性检测的 orchestrator。借鉴 Understand-Anything 的五阶段流水线（SCAN→BATCH→ANALYZE→MERGE→REVIEW），采用 coordinator + worker fan-out 架构：code-graph-builder / doc-graph-builder 两个 coordinator 并行起跑确定性阶段，分别拉起 N 个 code-batch-analyzer / doc-freetext-analyzer worker 并行做 LLM 语义合成，再由 coordinator 合并归一；graph-reviewer 做 schema 校验，consistency-checker 做四层次差异分析。一致性检测、设计漂移分析、文档同步审计、代码-文档对账、API 契约比对、'代码和文档对得上吗'、再次执行/重跑/更新一致性报告/部分重检/补充扫描/聚焦某模块、增量审计、refresh consistency report 等任务时必须使用本技能。"
 ---
 
 # Code-Doc Consistency Orchestrator（增强版）
 
-代码与设计文档一致性检测的整体流程协调器。本技能调度四个子代理：
+代码与设计文档一致性检测的整体流程协调器。本技能调度六个子代理：
 
-- **`code-graph-builder`**（并行）— 五阶段流水线从代码构建有向图
-- **`doc-graph-builder`**（并行）— 五阶段流水线从设计文档构建有向图
+- **`code-graph-builder`**（coordinator，并行）— 跑代码侧确定性阶段（SCAN/BATCH/extract-structure），输出 batches 清单
+- **`code-batch-analyzer`**（worker，fan-out 并行 N 个）— 每 worker 处理一个 batch 的 LLM 语义合成
+- **`doc-graph-builder`**（coordinator，并行）— 跑文档侧确定性阶段（DISCOVER/STRUCTURED），输出 markdown 清单
+- **`doc-freetext-analyzer`**（worker，fan-out 并行 N 个）— 每 worker 处理一份 markdown 的 LLM 抽取
 - **`graph-reviewer`**（顺序）— 对两图做 schema 校验 + 跨图 ID 风格预检
 - **`consistency-checker`**（顺序）— 多层次比较两图并生成差异报告
 
-## 实行模式: 子代理（Sub-agent）
+## 实行模式: coordinator + worker fan-out
 
-理由：用户明确指定"subagents 并行方式"；两图构建任务相互独立无需团队通信；reviewer / checker 只读取产物文件。Sub-agent + `run_in_background: true` 是最经济的并行方案。
+理由：用户明确要求"图谱生成不能太慢，需要开多个 subagent"。两图 coordinator 之间天然并行（独立 ground truth）；coordinator 内部把 LLM 语义合成阶段拆成 N 个独立 worker（每 batch / 每 markdown 一个），通过 `run_in_background: true` 同时跑，wall-clock 从 ~分钟级 batch 串行降到 ~并发的并行时间。
+
+并发上限受 Claude Code 同时拉起 subagent 数量限制（通常 min(16, cores-2)）；超出会自然排队。这对绝大多数项目（< 16 batches、< 16 markdown 文档）足够。
 
 ## 代理构成
 
-| 代理 | subagent_type | 阶段 | 角色 | 技能 | 输出 |
-|------|--------------|------|------|------|------|
-| code-graph-builder | code-graph-builder（自定义） | Phase 2 并行 | 代码 → 图（5 阶段） | `/code-graph-rag` | `_workspace/01_code_graph.json` + coverage |
-| doc-graph-builder | doc-graph-builder（自定义） | Phase 2 并行 | 文档 → 图（5 阶段） | `/doc-graph-rag` | `_workspace/02_doc_graph.json` + coverage |
-| graph-reviewer | graph-reviewer（自定义） | Phase 3 顺序 | schema/引用/质量 QA | inline 校验逻辑 | `_workspace/02_5_review_report.{json,md}` |
-| consistency-checker | consistency-checker（自定义） | Phase 4 顺序 | 四层差异分析 | `/graph-diff-analyzer` | `_workspace/03_diff_report.{json,md}` |
+| 代理 | subagent_type | 阶段 | 角色 | 输出 |
+|------|--------------|------|------|------|
+| code-graph-builder | code-graph-builder | Phase 2a 并行（与 doc 侧） | 代码侧 coordinator：SCAN/BATCH/extract-structure | `01_code_batches.json` + `01_code_extract_<i>.json[]` + 报告 batchTaskInputs |
+| code-batch-analyzer × N | code-batch-analyzer | Phase 2b fan-out 并行 | 单 batch LLM 语义合成 | `01_code_batch_<i>.json` |
+| code-graph-builder | code-graph-builder | Phase 2c 顺序 | 代码侧 coordinator：MERGE/REVIEW | `01_code_graph.json` + coverage |
+| doc-graph-builder | doc-graph-builder | Phase 2a 并行（与 code 侧） | 文档侧 coordinator：DISCOVER/STRUCTURED | `02_doc_inventory.json` + `02_doc_structured_*.json` + 报告 freetextTaskInputs |
+| doc-freetext-analyzer × M | doc-freetext-analyzer | Phase 2b fan-out 并行 | 单 markdown LLM 抽取 | `02_doc_freetext_<slug>.json` |
+| doc-graph-builder | doc-graph-builder | Phase 2c 顺序 | 文档侧 coordinator：MERGE/REVIEW | `02_doc_graph.json` + coverage |
+| graph-reviewer | graph-reviewer | Phase 3 顺序 | schema/引用/质量 QA | `02_5_review_report.{json,md}` |
+| consistency-checker | consistency-checker | Phase 4 顺序 | 四层差异分析 | `03_diff_report.{json,md}` |
 
 所有 Agent 调用必须指定 `model: "opus"`。
 
@@ -39,11 +47,12 @@ description: "代码与设计文档一致性检测的 orchestrator。借鉴 Unde
 | 状态 | 用户请求 | 执行模式 |
 |------|---------|---------|
 | `_workspace/` 不存在 | — | **初次执行**：进 Phase 1 |
-| 存在 + "只重新分析代码" | — | **部分重执行**：仅调用 code-graph-builder + reviewer + checker |
-| 存在 + "只重新分析文档" | — | **部分重执行**：仅调用 doc-graph-builder + reviewer + checker |
+| 存在 + "只重新分析代码" | — | **部分重执行**：仅跑代码侧 Phase 2a→2b→2c + reviewer + checker |
+| 存在 + "只重新分析文档" | — | **部分重执行**：仅跑文档侧 Phase 2a→2b→2c + reviewer + checker |
 | 存在 + "只更新差异分析" / "聚焦 API" | — | **仅 checker**：保留两图，给 checker 传 focus 参数 |
 | 存在 + 新输入 / "完整重跑" | — | **新执行**：将现有 `_workspace/` 移到 `_workspace_<YYYYMMDD_HHMMSS>/` 后进 Phase 1 |
-| 存在 + reviewer 之前 reject | — | **builder 重试**：调用对应 builder 一次重跑 |
+| 存在 + reviewer 之前 reject | — | **coordinator 重跑 Phase 2c**：重新 MERGE/REVIEW；如根因在 ANALYZE 则触发对应 worker 局部重跑 |
+| 存在 + 仅个别 batch / markdown 失败 | "续跑"/"补齐缺失批次" | **worker 局部重跑**：只对缺失的 batch/markdown 拉起 worker，coordinator 重跑 Phase 2c 合并 |
 
 部分重执行时把已有产物路径明确传给 subagent。
 
@@ -136,36 +145,74 @@ node ${CLAUDE_PLUGIN_ROOT}/skills/code-doc-consistency-orchestrator/scripts/reso
 
 不要因为"想确认一下"就反复询问 — 默认 + 摘要告知 + 改主意机会，比反复来回更尊重用户时间。
 
-### Phase 2: 并行构建两份图谱（五阶段流水线）
+### Phase 2: 并行构建两份图谱（coordinator + worker fan-out）
 
-**实行模式：子代理并行**
+**实行模式：每侧 coordinator → fan-out N worker → coordinator 合并；两侧之间从头到尾并行。**
 
-在**单消息**中同时发起两个 Agent 调用，`run_in_background: true`：
+整体时序：
+
+```
+Phase 2a (并行起跑):
+  Agent(code-graph-builder, run_in_background=true)   → 跑 SCAN/BATCH/extract-structure，回报 batchTaskInputs[]
+  Agent(doc-graph-builder,  run_in_background=true)   → 跑 DISCOVER/STRUCTURED，回报 freetextTaskInputs[]
+
+  ↓ 等两侧 coordinator 各自回报 ready
+
+Phase 2b (fan-out 大并行):
+  对 batchTaskInputs[] 中的每一项     → Agent(code-batch-analyzer,    run_in_background=true)
+  对 freetextTaskInputs[] 中的每一项  → Agent(doc-freetext-analyzer,  run_in_background=true)
+
+  全部 N+M 个 worker 在同一消息里发出，Claude Code 会按并发上限调度
+
+  ↓ 等所有 worker 完成（或失败）
+
+Phase 2c (并行收尾):
+  Agent(code-graph-builder, run_in_background=true)   → 跑 MERGE/REVIEW，输出 01_code_graph.json
+  Agent(doc-graph-builder,  run_in_background=true)   → 跑 MERGE/REVIEW，输出 02_doc_graph.json
+
+  ↓ 两图就绪，进 Phase 3
+```
+
+#### Phase 2a — coordinator 起跑
+
+在**单条消息**中同时发起两个 coordinator：
 
 ```
 Agent(
   subagent_type: "code-graph-builder",
   model: "opus",
   run_in_background: true,
-  description: "Build code graph (5-stage pipeline)",
+  description: "Code graph: SCAN + BATCH + extract-structure (deterministic)",
   prompt: """
-    项目根目录: <code_root>
-    输出路径: _workspace/01_code_graph.json
-    覆盖率报告: _workspace/01_code_graph_coverage.md
+    ROLE: coordinator (Phase 2a — deterministic prep only)
+    PROJECT_ROOT: <code_root>
+    WORKSPACE: $PROJECT_ROOT/_workspace
+    PLUGIN_ROOT: ${CLAUDE_PLUGIN_ROOT}
     生成时间戳: <generated_at>
     聚焦范围（可选）: <focus>
 
-    调用 /code-graph-rag 技能，执行 SCAN → BATCH → ANALYZE → MERGE → REVIEW 五阶段流水线。
+    本次只跑 Phase 1–3：SCAN、BATCH、ANALYZE-prep（per-batch extract-structure）。
 
-    必须使用以下 bundled 脚本（零依赖 Node.js，禁止重新实现）：
-    - SCAN:    ${CLAUDE_PLUGIN_ROOT}/skills/code-graph-rag/scripts/scan-project.mjs
-    - imports: ${CLAUDE_PLUGIN_ROOT}/skills/code-graph-rag/scripts/extract-import-map.mjs
-    - BATCH:   ${CLAUDE_PLUGIN_ROOT}/skills/code-graph-rag/scripts/compute-batches.mjs
-    - ANALYZE: ${CLAUDE_PLUGIN_ROOT}/skills/code-graph-rag/scripts/extract-structure.mjs (per batch)
-    - MERGE:   ${CLAUDE_PLUGIN_ROOT}/skills/code-graph-rag/scripts/merge-batch-graphs.mjs --side=code
+    必须依次调用 bundled 脚本（不要写一次性正则、不要 Read 源码合成 summary）：
+      1. ${CLAUDE_PLUGIN_ROOT}/skills/code-graph-rag/scripts/scan-project.mjs
+      2. ${CLAUDE_PLUGIN_ROOT}/skills/code-graph-rag/scripts/extract-import-map.mjs
+      3. ${CLAUDE_PLUGIN_ROOT}/skills/code-graph-rag/scripts/compute-batches.mjs
+      4. 对每个 batch 调一次 ${CLAUDE_PLUGIN_ROOT}/skills/code-graph-rag/scripts/extract-structure.mjs
 
-    LLM 的工作仅限于：每个节点的 summary/tags/complexity 合成 + 用 neighborMap 推断跨 batch 的 calls/related 边。
-    严格遵循 references/graph-schema.md 中的 schema 与 ID 命名规范。
+    完成后回报 JSON：
+      { "phase": "analyze-ready",
+        "batchCount": <N>,
+        "batchTaskInputs": [
+          { "batchIndex": 0,
+            "batchInputPath":   "_workspace/01_code_batches.json",
+            "batchExtractPath": "_workspace/01_code_extract_0.json",
+            "outputPath":       "_workspace/01_code_batch_0.json" },
+          ...
+        ]
+      }
+
+    不要进入 ANALYZE 阶段（LLM 语义合成）—— 那由 orchestrator 拉起 N 个 code-batch-analyzer 处理。
+    不要跑 MERGE/REVIEW —— 那由 Phase 2c 再次激活时跑。
   """
 )
 
@@ -173,32 +220,144 @@ Agent(
   subagent_type: "doc-graph-builder",
   model: "opus",
   run_in_background: true,
-  description: "Build doc graph (5-stage pipeline)",
+  description: "Doc graph: DISCOVER + STRUCTURED (deterministic)",
   prompt: """
-    文档根目录: <doc_root>
-    输出路径: _workspace/02_doc_graph.json
-    覆盖率报告: _workspace/02_doc_graph_coverage.md
+    ROLE: coordinator (Phase 2a — deterministic prep only)
+    DOC_ROOTS: <doc_roots, comma-separated>
+    WORKSPACE: $PROJECT_ROOT/_workspace
+    PLUGIN_ROOT: ${CLAUDE_PLUGIN_ROOT}
     生成时间戳: <generated_at>
-    聚焦范围（可选）: <focus>
     别名词表（可选）: _workspace/aliases.json
 
-    调用 /doc-graph-rag 技能，执行 DISCOVER → STRUCTURED → FREETEXT → MERGE → REVIEW 五阶段流水线。
+    本次只跑 Phase 1–2：DISCOVER、STRUCTURED。
 
-    必须使用以下 bundled 脚本（零依赖 Node.js，禁止重新实现）：
-    - DISCOVER:   ${CLAUDE_PLUGIN_ROOT}/skills/doc-graph-rag/scripts/discover-docs.mjs
-    - STRUCTURED: ${CLAUDE_PLUGIN_ROOT}/skills/doc-graph-rag/scripts/extract-doc-structure.mjs
-                  (处理 OpenAPI/Proto/GraphQL/Mermaid/PlantUML/JSON Schema + markdown 嵌入 mermaid)
-    - MERGE:      ${CLAUDE_PLUGIN_ROOT}/skills/code-graph-rag/scripts/merge-batch-graphs.mjs --side=design
+    必须依次调用 bundled 脚本：
+      1. ${CLAUDE_PLUGIN_ROOT}/skills/doc-graph-rag/scripts/discover-docs.mjs
+      2. ${CLAUDE_PLUGIN_ROOT}/skills/doc-graph-rag/scripts/extract-doc-structure.mjs \
+           _workspace/02_doc_inventory.json _workspace --split --output-prefix="02_doc_structured_"
 
-    LLM 的工作仅限于 FREETEXT 阶段：自由文本 markdown 的实体/关系语义抽取，标注措辞置信度。
-    严格遵循与代码图同一 schema 与 ID 命名规范（references/graph-schema.md）。
+    完成后从 02_doc_inventory.json 中筛出 docType=markdown 的文档，回报 JSON：
+      { "phase": "freetext-ready",
+        "markdownCount": <M>,
+        "freetextTaskInputs": [
+          { "docPath":       "docs/architecture.md",
+            "inventoryPath": "_workspace/02_doc_inventory.json",
+            "outputPath":    "_workspace/02_doc_freetext_docs_architecture.json",
+            "aliasesPath":   "_workspace/aliases.json" },
+          ...
+        ]
+      }
+
+    outputPath 的 slug = docPath 的 / 替换为 _ 并去扩展名（与 doc-freetext-analyzer 约定一致）。
+
+    不要进入 FREETEXT —— 那由 orchestrator 拉起 N 个 doc-freetext-analyzer 处理。
+    不要跑 MERGE/REVIEW —— 那由 Phase 2c 再次激活时跑。
+  """
+)
+```
+
+**等待两侧都回报 ready**。如果某侧 coordinator 失败：1 次重试。仍失败 → 终止该侧（如代码侧失败则整体终止；文档侧失败则降级为只生成代码图）。
+
+#### Phase 2b — worker fan-out
+
+读取两侧 coordinator 的回报，得到 `batchTaskInputs[]` 和 `freetextTaskInputs[]`。
+
+**在单条消息中**同时发出全部 N + M 个 worker（每个 `run_in_background: true`）：
+
+```
+// 对每个 batchTaskInputs[i]:
+Agent(
+  subagent_type: "code-batch-analyzer",
+  model: "opus",
+  run_in_background: true,
+  description: "Code analyze batch <i>",
+  prompt: """
+    batchIndex: <i>
+    batchInputPath:   <from batchTaskInputs[i].batchInputPath>
+    batchExtractPath: <from batchTaskInputs[i].batchExtractPath>
+    scanPath:         _workspace/01_code_scan.json
+    outputPath:       <from batchTaskInputs[i].outputPath>
+    projectRoot:      <code_root>
+
+    只对 batchIndex=<i> 这一批做 LLM 语义合成（summary/tags/complexity + calls/related）。
+    严格遵循 code-batch-analyzer agent 定义的工作流；不要跑 SCAN/BATCH/extract-structure；不要读其他 batch。
+    产物写入 outputPath 即完成。
+  """
+)
+
+// 对每个 freetextTaskInputs[j]:
+Agent(
+  subagent_type: "doc-freetext-analyzer",
+  model: "opus",
+  run_in_background: true,
+  description: "Doc freetext <slug>",
+  prompt: """
+    docPath:       <from freetextTaskInputs[j].docPath>
+    inventoryPath: <from freetextTaskInputs[j].inventoryPath>
+    outputPath:    <from freetextTaskInputs[j].outputPath>
+    aliasesPath:   <from freetextTaskInputs[j].aliasesPath>
+    projectRoot:   $PROJECT_ROOT
+
+    只对这一份 markdown 做章节切分 + 实体/关系/置信度抽取。
+    严格遵循 doc-freetext-analyzer agent 定义的工作流；不要读其他 markdown。
+    产物写入 outputPath 即完成。
   """
 )
 ```
 
 **完成判定**：
-- 两 subagent 都完成且产物存在 → 进 Phase 3
-- 任一失败：1 次重试 → 仍失败则记录到最终报告并尝试单图分析（仅文档可用 → 输出"实现侧空缺"报告）/终止（仅代码可用无法对比）
+- 全部 worker 都完成（产物文件存在）→ 进 Phase 2c
+- 个别 worker 失败：对失败的那个重跑 1 次。仍失败 → 在 coverage 中记 `missing_batches` / `missing_freetext_docs`，**不**整套重跑
+- > 30% worker 失败 → 视作 coordinator 阶段问题，回 Phase 2a 重跑该侧 coordinator 一次
+
+#### Phase 2c — coordinator 收尾合并
+
+在**单条消息**中同时再次激活两个 coordinator：
+
+```
+Agent(
+  subagent_type: "code-graph-builder",
+  model: "opus",
+  run_in_background: true,
+  description: "Code graph: MERGE + REVIEW",
+  prompt: """
+    ROLE: coordinator (Phase 2c — merge + review)
+    WORKSPACE: $PROJECT_ROOT/_workspace
+    PLUGIN_ROOT: ${CLAUDE_PLUGIN_ROOT}
+
+    本次只跑 Phase 5–6：MERGE、REVIEW。
+
+    1. 验证 _workspace/01_code_batch_*.json 是否齐全（按 01_code_batches.json 中的 batchCount）；
+       缺失的 batch 在最终 coverage 中记 missing_batches，不要重跑。
+    2. node ${CLAUDE_PLUGIN_ROOT}/skills/code-graph-rag/scripts/merge-batch-graphs.mjs \\
+         _workspace _workspace/01_code_assembled.json \\
+         --side=code --pattern="01_code_batch_*.json"
+    3. 写最终 _workspace/01_code_graph.json 与 _workspace/01_code_graph_coverage.md。
+  """
+)
+
+Agent(
+  subagent_type: "doc-graph-builder",
+  model: "opus",
+  run_in_background: true,
+  description: "Doc graph: MERGE + REVIEW",
+  prompt: """
+    ROLE: coordinator (Phase 2c — merge + review)
+    WORKSPACE: $PROJECT_ROOT/_workspace
+    PLUGIN_ROOT: ${CLAUDE_PLUGIN_ROOT}
+
+    本次只跑 Phase 4–5：MERGE、REVIEW。
+
+    1. 验证 _workspace/02_doc_freetext_*.json 是否齐全；缺失的记 missing_freetext_docs。
+    2. node ${CLAUDE_PLUGIN_ROOT}/skills/code-graph-rag/scripts/merge-batch-graphs.mjs \\
+         _workspace _workspace/02_doc_assembled.json \\
+         --side=design --pattern="02_doc_structured_*.json,02_doc_freetext_*.json"
+    3. 写最终 _workspace/02_doc_graph.json 与 _workspace/02_doc_graph_coverage.md。
+  """
+)
+```
+
+两个 coordinator 都完成且产物存在 → 进 Phase 3。
 
 ### Phase 3: 图谱质量审查
 
@@ -352,10 +511,20 @@ Agent(
   ↓
 [Phase 1: 准备 _workspace/00_input/]
   ↓
-[Phase 2 · 并行] (五阶段流水线)
-  ├─→ Agent(code-graph-builder)  → 01_code_graph.json + coverage
-  └─→ Agent(doc-graph-builder)   → 02_doc_graph.json + coverage
-  ↓ (两者都就绪)
+[Phase 2a · 双侧 coordinator 并行]
+  ├─→ Agent(code-graph-builder)  ──→ SCAN/BATCH/extract-structure
+  │                              ──→ 回报 batchTaskInputs[]
+  └─→ Agent(doc-graph-builder)   ──→ DISCOVER/STRUCTURED
+                                 ──→ 回报 freetextTaskInputs[]
+  ↓
+[Phase 2b · worker 大并行 fan-out（一条消息发 N + M 个）]
+  ├─→ Agent(code-batch-analyzer #0..N-1)   → 01_code_batch_<i>.json
+  └─→ Agent(doc-freetext-analyzer #0..M-1) → 02_doc_freetext_<slug>.json
+  ↓
+[Phase 2c · 双侧 coordinator 并行收尾]
+  ├─→ Agent(code-graph-builder)  ──→ MERGE/REVIEW → 01_code_graph.json + coverage
+  └─→ Agent(doc-graph-builder)   ──→ MERGE/REVIEW → 02_doc_graph.json + coverage
+  ↓ (两图就绪)
 [Phase 3 · 顺序]
    Agent(graph-reviewer) ← 读两图 → 02_5_review_report.{json,md}
                         decision: pass / pass_with_warnings / reject
@@ -373,16 +542,19 @@ Agent(
 
 | 状况 | 策略 |
 |------|------|
-| code-graph-builder 失败 | 1 次重试。再失败 → 终止 |
-| doc-graph-builder 失败 | 1 次重试。再失败 → 提示用户提供文档；可选输出代码图 + "无文档可对比"报告 |
-| 两 builder 同时失败 | 终止，向用户报告（很可能是输入路径错误）|
-| graph-reviewer 决定 reject | 找出哪图 reject，对应 builder 重试 1 次。仍 reject → 继续到 checker，但报告中显著标注 |
+| code-graph-builder Phase 2a 失败 | 1 次重试。再失败 → 终止 |
+| doc-graph-builder Phase 2a 失败 | 1 次重试。再失败 → 提示用户提供文档；可选输出代码图 + "无文档可对比"报告 |
+| 两 coordinator Phase 2a 同时失败 | 终止，向用户报告（很可能是输入路径错误） |
+| 个别 batch-analyzer / freetext-analyzer 失败 | 仅对失败的那个 worker 重跑 1 次。再失败 → 在 coverage 中记 missing，不整套重跑 |
+| > 30% worker 失败 | 视作 coordinator 阶段问题，回 Phase 2a 重跑该侧 coordinator 一次 |
+| coordinator Phase 2c 失败 | 1 次重试。再失败 → 把 batch 产物当作半成品，向 reviewer 报告"图谱未合并完整" |
+| graph-reviewer 决定 reject | 找出哪图 reject，对应 coordinator 重跑 Phase 2c 一次（重新 MERGE）；如确实是 ANALYZE 阶段问题，触发该侧 worker 部分重跑。仍 reject → 继续到 checker，但报告中显著标注 |
 | consistency-checker 失败 | 1 次重试。再失败 → 输出两图 + reviewer 报告供人工对比 |
 | 节点对齐歧义 > 20% | 不终止，但在最终报告显著位置提示"建议提供别名词表后重跑" |
 | `_workspace/` 写入失败 | 检查权限，向用户报告并终止 |
-| 任一 subagent 超时（10 分钟） | 视作失败处理 |
+| 任一 subagent 超时（coordinator 10 分钟、worker 5 分钟） | 视作失败处理 |
 
-**原则**：单点失败不删除已有产物，记录到报告中。
+**原则**：单点失败不删除已有产物，记录到报告中。worker 失败优先局部重跑，避免整套返工。
 
 ## 测试场景
 
