@@ -50,7 +50,13 @@ ID 与边规则严格对齐 `references/graph-schema.md`（在 `code-graph-rag` 
 - **file 节点**：每个 batchFile 都发一个，summary 描述其作用与角色（不是文件名复述），tags 3–5 个
 - **function 节点**：仅显著函数 — ≥10 行、或被导出、或在 callGraph 中是 hub。trivial 单行/简单 re-export 跳过
 - **class 节点**：≥2 方法或 ≥20 行、或被导出
-- **config / document / service / pipeline / resource / table / schema / endpoint** 节点：按 fileCategory + 结构抽取产出来填，summary 风格遵循 SKILL.md C.2 各 fileCategory 段落
+- **interface 节点**：Java/Kotlin 接口声明（extract-structure 输出 `interfaces[]`）
+- **enum 节点**：Java 枚举类型（extract-structure 输出 `enums[]`）
+- **annotation 节点**：Java 注解类型定义
+- **entity 节点**：JPA `@Entity` 标注的类（extract-structure 输出 `jpaEntities[]`）
+- **configuration 节点**：Spring `@Configuration` 类（extract-structure 输出 `springConfig[]`）
+- **endpoint 节点**：Spring MVC `@Controller`/`@RestController` 的方法映射（extract-structure 输出 `springEndpoints[]`）
+- **config / document / service / pipeline / resource / table / schema** 节点：按 fileCategory + 结构抽取产出来填
 
 每节点必填：`id`（带前缀）、`type`、`name`、`source.{file,line_start,line_end}`、`summary`、`tags`、`complexity`、`confidence`（默认 `"high"`，动态/反射导致无法静态确定时降 `"low"` + `unresolved: true`）、`abstraction_level: "concrete"`。
 
@@ -63,7 +69,16 @@ ID 与边规则严格对齐 `references/graph-schema.md`（在 `code-graph-rag` 
 | `exports` | file → 它导出的 function/class（与 contains 并存） | ✅ |
 | `calls` | callGraph 中跨文件的调用 + 用 neighborMap 解析跨 batch 目标 | best effort |
 | `inherits`/`implements` | 类继承/实现关系 | best effort |
+| `implements_interface` | 类 → Java 接口（比 implements 更精确） | best effort |
 | `tested_by` | 生产文件 → 测试文件（方向必须 prod → test） | best effort |
+| `annotated_with` | 类/方法/字段 → 注解节点 | best effort |
+| `autowires` | `@Autowired` 字段 → Bean 类型 | best effort |
+| `exposes_endpoint` | Controller 类 → endpoint 节点（从 springEndpoints[] 生成） | best effort |
+| `configures_bean` | `@Configuration` 类 → `@Bean` 方法产出的类型 | best effort |
+| `maps_to_table` | `@Entity` 类 → table 节点 | best effort |
+| `defines_mapper` | Mapper 接口 → XML 映射文件 | best effort |
+| `consumes_message` | `@RabbitListener`/`@KafkaListener` 方法 → 消息目标 | best effort |
+| `produces_message` | 消息发送方法 → 消息目标 | best effort |
 
 **neighborMap 用法**：你看到 `src/auth/login.ts` 调用 `signJWT(...)`，且 neighborMap 里 `src/auth/jwt.ts` 暴露了 `signJWT` —— 发出 `calls` 边到 `function:src/auth/jwt.ts:signJWT`，weight 0.8、confidence high。如果 neighborMap 里没有匹配（可能在另一批，但 import 解析不到），降级为 weight 0.3 + `unresolved: true`。
 

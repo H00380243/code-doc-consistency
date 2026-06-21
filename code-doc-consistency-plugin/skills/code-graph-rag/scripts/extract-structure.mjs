@@ -2,27 +2,44 @@
 /**
  * extract-structure.mjs — Phase C.1 of /code-graph-rag (per-file extraction)
  *
- * Self-contained adaptation: regex/heuristic-based extraction of functions,
- * classes, exports, and non-code structural elements (services, endpoints,
- * steps, resources). Trades tree-sitter accuracy for zero-dependency
- * portability — covers the 80% case across all 12 supported code languages
- * plus the non-code categories Understand-Anything handles.
+ * Self-contained adaptation: tree-sitter WASM (when available) or
+ * regex/heuristic-based extraction of functions, classes, exports, and
+ * non-code structural elements (services, endpoints, steps, resources).
  *
- * Per-language regexes are deliberately conservative: they catch the canonical
- * declaration forms (export function X / def X / func X / fn X / class X)
- * and skip exotic forms rather than over-match. The LLM in Phase C.2 fills
- * in summaries; the merge script drops anything that doesn't reference an
- * existing node.
+ * Tree-sitter WASM provides accurate AST parsing for Java when the WASM
+ * files are available. Falls back to regex parsing (zero dependencies)
+ * for all other languages or when tree-sitter is not installed.
  *
  * Usage:
- *   node extract-structure.mjs <input.json> <output.json>
+ *   node extract-structure.mjs <input.json> <output.json> [--wasm-dir=<path>]
  *
  * Input:  { projectRoot, batchFiles: [{ path, language, sizeLines, fileCategory }] }
- * Output: { scriptCompleted, filesAnalyzed, filesSkipped, results: [...] }
+ * Output: { scriptCompleted, filesAnalyzed, filesSkipped, parserUsed, results: [...] }
  */
 
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { dirname, join, basename } from 'node:path';
+
+// ---------------------------------------------------------------------------
+// Tree-sitter WASM integration (optional dependency)
+// ---------------------------------------------------------------------------
+
+let treeSitterAvailable = null;
+let treeSitterModule = null;
+
+async function loadTreeSitter(wasmDir) {
+  if (treeSitterAvailable !== null) return treeSitterAvailable;
+
+  try {
+    const modulePath = join(dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Z]:)/, '$1')), 'tree-sitter-java.mjs');
+    treeSitterModule = await import(modulePath);
+    treeSitterAvailable = true;
+    return true;
+  } catch {
+    treeSitterAvailable = false;
+    return false;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Code language extractors
@@ -212,32 +229,500 @@ function parseRust(content) {
   return { functions: fns, classes, exports: exports_, callGraph: [] };
 }
 
-function parseJavaKotlin(content) {
-  const fns = [], classes = [], exports_ = [];
-  // Java/Kotlin methods: visibility return name(params)
-  const fnRe = /(?:^|\n)\s*(?:public|private|protected|internal)?\s*(?:static\s+)?(?:final\s+)?(?:override\s+)?(?:abstract\s+)?(?:fun|[\w<>[\], ]+)\s+(\w+)\s*\(([^)]*)\)/g;
-  let m;
-  while ((m = fnRe.exec(content))) {
-    if (['if', 'for', 'while', 'switch', 'catch', 'return', 'class', 'interface'].includes(m[1])) continue;
-    const name = m[1]; const params = m[2].split(',').map(s => s.trim()).filter(Boolean);
-    const start = lineOf(content, m.index);
-    const openIdx = content.indexOf('{', m.index);
-    const end = openIdx >= 0 ? findBlockEnd(content, openIdx) : start;
-    fns.push({ name, startLine: start, endLine: end, params });
+// -- Java/Spring annotation extraction helpers ------------------------------
+
+function extractAnnotations(content, lineStart, lineEnd) {
+  // Extract all annotations preceding or within a declaration range
+  const annotations = [];
+  const lines = content.split('\n');
+  const start = Math.max(0, (lineStart || 1) - 1);
+  const end = Math.min(lines.length, lineEnd || lines.length);
+  const re = /@(\w+)(?:\(([^)]*)\))?/g;
+  for (let i = start; i < end; i++) {
+    let m;
+    while ((m = re.exec(lines[i]))) {
+      const name = m[1];
+      const rawArgs = m[2] || null;
+      annotations.push({ name, rawArgs, line: i + 1 });
+    }
+    re.lastIndex = 0;
   }
-  const cls = /(?:^|\n)\s*(?:public|private|protected|internal)?\s*(?:abstract\s+|final\s+)?(?:class|interface|object)\s+(\w+)(?:\s*<[^>]*>)?(?:\s*(?:extends|:)\s*([\w<>., ]+))?/g;
-  while ((m = cls.exec(content))) {
-    const name = m[1]; const start = lineOf(content, m.index);
-    const openIdx = content.indexOf('{', m.index);
+  return annotations;
+}
+
+function extractJavaPackage(content) {
+  const m = content.match(/(?:^|\n)\s*package\s+([\w.]+)\s*;/);
+  return m ? m[1] : null;
+}
+
+function extractJavaFields(content, classStartLine, classEndLine) {
+  // Extract Java fields: [annotations] [modifiers] Type name [= value];
+  const fields = [];
+  const lines = content.split('\n');
+  const start = Math.max(0, (classStartLine || 1) - 1);
+  const end = Math.min(lines.length, classEndLine || lines.length);
+
+  const fieldRe = /^\s*(?:@\w+(?:\([^)]*\))?\s+)*(?:(?:public|private|protected)\s+)?(?:static\s+)?(?:final\s+)?(?:volatile\s+)?(?:transient\s+)?([\w<>\[\], ?]+)\s+(\w+)\s*[;=]/;
+
+  for (let i = start; i < end; i++) {
+    const m = fieldRe.exec(lines[i]);
+    if (m) {
+      const type = m[1].trim();
+      const name = m[2];
+      // Skip if it looks like a method declaration (has parentheses after name)
+      const afterName = lines[i].slice(lines[i].indexOf(name) + name.length).trim();
+      if (afterName.startsWith('(')) continue;
+      // Skip common false positives
+      if (['return', 'throw', 'new', 'if', 'for', 'while'].includes(type)) continue;
+
+      const fieldAnnotations = [];
+      const annRe = /@(\w+)/g;
+      let am;
+      while ((am = annRe.exec(lines[i]))) {
+        fieldAnnotations.push(am[1]);
+      }
+
+      fields.push({
+        name,
+        type,
+        annotations: fieldAnnotations,
+        line: i + 1,
+        visibility: lines[i].includes('private') ? 'private'
+          : lines[i].includes('protected') ? 'protected'
+          : lines[i].includes('public') ? 'public' : 'package-private',
+        isStatic: /\bstatic\b/.test(lines[i]),
+        isFinal: /\bfinal\b/.test(lines[i]),
+      });
+    }
+  }
+  return fields;
+}
+
+function extractJavaMethods(content, classStartLine, classEndLine) {
+  // Extract Java methods with full signatures, annotations, return types
+  const methods = [];
+  const lines = content.split('\n');
+  const start = Math.max(0, (classStartLine || 1) - 1);
+  const end = Math.min(lines.length, classEndLine || lines.length);
+
+  // Build a continuous block to search (handles multi-line signatures)
+  let block = '';
+  let lineMap = []; // maps char index to line number
+  for (let i = start; i < end; i++) {
+    lineMap.push(i + 1);
+    block += lines[i] + '\n';
+  }
+
+  // Method pattern: [annotations] [modifiers] ReturnType methodName(params) [throws ...] {
+  // We look for lines that end with { or ; (abstract methods) and contain method signatures
+  const methodRe = /(?:^|\n)\s*(?:@\w+(?:\([^)]*\))?\s+)*(?:(?:public|private|protected)\s+)?(?:static\s+)?(?:final\s+)?(?:abstract\s+)?(?:synchronized\s+)?(?:native\s+)?(?:default\s+)?([\w<>\[\], ?]+)\s+(\w+)\s*\(([^)]*)\)\s*(?:throws\s+[\w., ]+)?\s*[{;]/g;
+
+  let m;
+  while ((m = methodRe.exec(block))) {
+    const returnType = m[1].trim();
+    const name = m[2];
+    const rawParams = m[3];
+
+    // Skip Java keywords that look like methods
+    if (['if', 'for', 'while', 'switch', 'catch', 'return', 'throw', 'new', 'class', 'interface', 'enum', 'package', 'import'].includes(name)) continue;
+    // Skip if returnType is a visibility keyword (means regex matched a constructor call inside a method body)
+    if (['public', 'private', 'protected', 'static', 'final', 'abstract'].includes(returnType)) continue;
+    if (['void', 'int', 'long', 'double', 'float', 'boolean', 'char', 'byte', 'short', 'String'].includes(returnType) && !rawParams) continue;
+
+    // Calculate line number from the method name position (not match start, which includes annotations)
+    const nameOffset = m[0].indexOf(name);
+    const charIdx = m.index + (nameOffset >= 0 ? nameOffset : 0);
+    // Approximate line number from char index
+    let lineNum = start + 1;
+    let charCount = 0;
+    for (let i = start; i < end; i++) {
+      charCount += lines[i].length + 1;
+      if (charCount > charIdx) { lineNum = i + 1; break; }
+    }
+
+    const params = rawParams.split(',').map(s => {
+      const parts = s.trim().split(/\s+/);
+      if (parts.length >= 2) {
+        return { type: parts.slice(0, -1).join(' '), name: parts[parts.length - 1].replace(/[,;]/g, '') };
+      }
+      return { type: '', name: s.trim() };
+    }).filter(p => p.name);
+
+    // Extract annotations on this method (look backwards from current line)
+    const methodAnnotations = [];
+    for (let i = Math.max(start, lineNum - 5); i < lineNum - 1; i++) {
+      const annRe = /@(\w+)/g;
+      let am;
+      while ((am = annRe.exec(lines[i]))) {
+        methodAnnotations.push(am[1]);
+      }
+    }
+
+    const isConstructor = returnType === name || returnType === '';
+
+    methods.push({
+      name,
+      returnType: isConstructor ? 'void' : returnType,
+      params,
+      annotations: methodAnnotations,
+      line: lineNum,
+      visibility: block.slice(Math.max(0, m.index - 30), m.index).includes('private') ? 'private'
+        : block.slice(Math.max(0, m.index - 30), m.index).includes('protected') ? 'protected'
+        : 'public',
+      isStatic: block.slice(Math.max(0, m.index - 30), m.index).includes('static'),
+      isAbstract: block.slice(Math.max(0, m.index - 30), m.index).includes('abstract'),
+      isConstructor,
+    });
+  }
+
+  return methods;
+}
+
+function parseJavaRegex(content) {
+  const fns = [], classes = [], interfaces = [], enums = [], exports_ = [];
+  const allAnnotations = [];
+  let callGraph = [];
+
+  const pkg = extractJavaPackage(content);
+
+  // --- Extract annotations (top-level and nested) ---
+  const globalAnnRe = /@(\w+)/g;
+  let am;
+  while ((am = globalAnnRe.exec(content))) {
+    allAnnotations.push({ name: am[1], line: lineOf(content, am.index) });
+  }
+
+  // --- Extract interfaces ---
+  const ifaceRe = /(?:^|\n)\s*(?:public|private|protected)?\s*(?:abstract\s+)?interface\s+(\w+)(?:\s*<([^>]*?)>)?(?:\s+extends\s+([\w., <>]+))?\s*\{/g;
+  while ((am = ifaceRe.exec(content))) {
+    const name = am[1];
+    const generics = am[2] ? am[2].split(',').map(s => s.trim()) : [];
+    const extendsList = am[3] ? am[3].split(',').map(s => s.trim()) : [];
+    const start = lineOf(content, am.index);
+    const openIdx = content.indexOf('{', am.index);
     const end = openIdx >= 0 ? findBlockEnd(content, openIdx) : start;
-    classes.push({ name, startLine: start, endLine: end, methods: [], properties: [], extends: m[2] || null });
+
+    const ifaceAnnotations = extractAnnotations(content, Math.max(1, start - 5), start);
+    const ifaceMethods = extractJavaMethods(content, start, end);
+    const ifaceFields = extractJavaFields(content, start, end);
+
+    interfaces.push({
+      name, startLine: start, endLine: end,
+      methods: ifaceMethods.map(m => m.name),
+      methodDetails: ifaceMethods,
+      fields: ifaceFields,
+      properties: [],
+      extends: extendsList.length ? extendsList : null,
+      generics,
+      annotations: ifaceAnnotations.map(a => a.name),
+      javaPackage: pkg,
+    });
     exports_.push({ name, line: start, isDefault: false });
   }
-  return { functions: fns, classes, exports: exports_, callGraph: [] };
+
+  // --- Extract enums ---
+  const enumRe = /(?:^|\n)\s*(?:public|private|protected)?\s*(?:abstract\s+)?enum\s+(\w+)(?:\s+implements\s+([\w., <>]+))?\s*\{/g;
+  while ((am = enumRe.exec(content))) {
+    const name = am[1];
+    const implementsList = am[2] ? am[2].split(',').map(s => s.trim()) : [];
+    const start = lineOf(content, am.index);
+    const openIdx = content.indexOf('{', am.index);
+    const end = openIdx >= 0 ? findBlockEnd(content, openIdx) : start;
+
+    // Extract enum constants
+    const block = content.slice(openIdx + 1, content.indexOf('}', openIdx));
+    const constants = [];
+    const skipWords = new Set(['public', 'private', 'protected', 'static', 'final', 'abstract', 'class', 'interface', 'enum', 'implements', 'extends']);
+    for (const line of block.split('\n')) {
+      const trimmed = line.trim().replace(/[,;{}]$/, '').trim();
+      if (trimmed && /^\w+$/.test(trimmed) && !skipWords.has(trimmed)) {
+        constants.push(trimmed);
+      }
+    }
+
+    const enumAnnotations = extractAnnotations(content, Math.max(1, start - 5), start);
+
+    enums.push({
+      name, startLine: start, endLine: end,
+      constants,
+      methods: [],
+      implements: implementsList.length ? implementsList : null,
+      annotations: enumAnnotations.map(a => a.name),
+      javaPackage: pkg,
+    });
+    exports_.push({ name, line: start, isDefault: false });
+  }
+
+  // --- Extract classes (after interfaces and enums to avoid double-matching) ---
+  const clsRe = /(?:^|\n)\s*(?:public|private|protected)?\s*(?:abstract\s+|final\s+)?class\s+(\w+)(?:\s*<([^>]*?)>)?(?:\s+extends\s+([\w., <>]+))?(?:\s+implements\s+([\w., <>]+))?\s*\{/g;
+  while ((am = clsRe.exec(content))) {
+    const name = am[1];
+    const generics = am[2] ? am[2].split(',').map(s => s.trim()) : [];
+    const extendsClass = am[3] || null;
+    const implementsList = am[4] ? am[4].split(',').map(s => s.trim()) : [];
+    const start = lineOf(content, am.index);
+    const openIdx = content.indexOf('{', am.index);
+    const end = openIdx >= 0 ? findBlockEnd(content, openIdx) : start;
+
+    const classAnnotations = extractAnnotations(content, Math.max(1, start - 10), start);
+    // Find nested class ranges within this class to exclude their methods
+    const nestedClassRe = /(?:^|\n)\s*(?:public|private|protected)?\s*(?:static\s+)?(?:abstract\s+|final\s+)?class\s+\w+/g;
+    const nestedRanges = [];
+    let ncm;
+    while ((ncm = nestedClassRe.exec(content))) {
+      const nStart = lineOf(content, ncm.index);
+      if (nStart > start && nStart < end) {
+        const nOpenIdx = content.indexOf('{', ncm.index);
+        const nEnd = nOpenIdx >= 0 ? findBlockEnd(content, nOpenIdx) : nStart;
+        nestedRanges.push([nStart, nEnd]);
+      }
+    }
+    const rawMethods = extractJavaMethods(content, start, end);
+    const classMethods = rawMethods.filter(m => !nestedRanges.some(([ns, ne]) => m.line >= ns && m.line <= ne));
+    const classFields = extractJavaFields(content, start, end);
+
+    classes.push({
+      name, startLine: start, endLine: end,
+      methods: classMethods.map(m => m.name),
+      methodDetails: classMethods,
+      fields: classFields,
+      properties: classFields.map(f => ({ name: f.name, type: f.type, annotations: f.annotations })),
+      extends: extendsClass,
+      implements: implementsList.length ? implementsList : null,
+      generics,
+      annotations: classAnnotations.map(a => a.name),
+      javaPackage: pkg,
+    });
+    exports_.push({ name, line: start, isDefault: false });
+  }
+
+  // --- Extract top-level functions (outside classes) ---
+  // Build list of class/interface/enum ranges to exclude
+  const typeRanges = [...classes, ...interfaces, ...enums].map(t => [t.startLine, t.endLine]);
+  const fnRe = /(?:^|\n)\s*(?:public|private|protected)?\s*(?:static\s+)?(?:final\s+)?(?:abstract\s+)?(?:synchronized\s+)?([\w<>\[\], ?]+)\s+(\w+)\s*\(([^)]*)\)\s*(?:throws\s+[\w., ]+)?\s*[{;]/g;
+  let fm;
+  while ((fm = fnRe.exec(content))) {
+    const returnType = fm[1].trim();
+    const name = fm[2];
+    const rawParams = fm[3];
+
+    if (['if', 'for', 'while', 'switch', 'catch', 'return', 'throw', 'new', 'class', 'interface', 'enum', 'package', 'import', 'public', 'private', 'protected'].includes(name)) continue;
+    if (['void', 'int', 'long', 'double', 'float', 'boolean', 'char', 'byte', 'short', 'String'].includes(returnType) && !rawParams) continue;
+
+    const start = lineOf(content, fm.index);
+    // Skip if inside a class/interface/enum
+    const insideType = typeRanges.some(([s, e]) => start >= s && start <= e);
+    if (insideType) continue;
+
+    const openIdx = content.indexOf('{', fm.index);
+    const end = openIdx >= 0 ? findBlockEnd(content, openIdx) : start;
+    const params = rawParams.split(',').map(s => {
+      const parts = s.trim().split(/\s+/);
+      if (parts.length >= 2) return parts[parts.length - 1].replace(/[,;]/g, '');
+      return s.trim();
+    }).filter(Boolean);
+
+    const fnAnnotations = extractAnnotations(content, Math.max(1, start - 5), start);
+
+    fns.push({
+      name,
+      startLine: start,
+      endLine: end,
+      params,
+      returnType,
+      annotations: fnAnnotations.map(a => a.name),
+      javaPackage: pkg,
+      visibility: content.slice(Math.max(0, fm.index - 30), fm.index).includes('private') ? 'private'
+        : content.slice(Math.max(0, fm.index - 30), fm.index).includes('protected') ? 'protected'
+        : 'public',
+      isStatic: content.slice(Math.max(0, fm.index - 30), fm.index).includes('static'),
+    });
+  }
+
+  // --- Build call graph (basic: method A calls method B within same file) ---
+  // Extract all method names from the file
+  const allMethodNames = new Set([
+    ...fns.map(f => f.name),
+    ...classes.flatMap(c => (c.methodDetails || []).map(m => m.name)),
+    ...interfaces.flatMap(i => (i.methodDetails || []).map(m => m.name)),
+  ]);
+
+  // Simple heuristic: look for method invocations in each method body
+  for (const fn of fns) {
+    const bodyStart = content.split('\n').slice(0, fn.startLine - 1).join('\n').length;
+    const bodyEnd = content.split('\n').slice(0, fn.endLine).join('\n').length;
+    const body = content.slice(bodyStart, bodyEnd);
+    for (const callee of allMethodNames) {
+      if (callee === fn.name) continue;
+      const callRe = new RegExp(`\\b${callee}\\s*\\(`, 'g');
+      if (callRe.test(body)) {
+        callGraph.push({ caller: fn.name, callee, lineNumber: fn.startLine });
+      }
+    }
+  }
+
+  return {
+    functions: fns,
+    classes,
+    interfaces,
+    enums,
+    exports: exports_,
+    annotations: allAnnotations,
+    callGraph,
+    javaPackage: pkg,
+  };
+}
+
+/**
+ * Parse Java source code using tree-sitter WASM if available, else regex.
+ *
+ * @param {string} content - Java source code
+ * @param {string} wasmDir - Optional path to tree-sitter WASM directory
+ * @returns {Promise<object>} - Parsed structure
+ */
+async function parseJava(content, wasmDir) {
+  // Try tree-sitter WASM first
+  if (treeSitterAvailable !== false) {
+    try {
+      const available = treeSitterAvailable ?? await loadTreeSitter(wasmDir);
+      if (available && treeSitterModule) {
+        const result = await treeSitterModule.parseJava(content, { wasmDir });
+        if (result) {
+          // Tree-sitter result needs normalization to match regex output format
+          return normalizeTreeSitterResult(result, content);
+        }
+      }
+    } catch {
+      // Fall through to regex
+    }
+  }
+
+  // Fallback to regex parser
+  return parseJavaRegex(content);
+}
+
+/**
+ * Normalize tree-sitter AST output to match the regex parser's output format.
+ */
+function normalizeTreeSitterResult(ast, content) {
+  const pkg = extractJavaPackage(content);
+
+  // Normalize classes to include methodDetails and properties
+  const classes = (ast.classes || []).map(cls => {
+    const fullMethods = extractJavaMethods(content, cls.startLine, cls.endLine);
+    const fields = extractJavaFields(content, cls.startLine, cls.endLine);
+    const classAnnotations = extractAnnotations(content, Math.max(1, cls.startLine - 10), cls.startLine);
+
+    return {
+      name: cls.name,
+      startLine: cls.startLine,
+      endLine: cls.endLine,
+      methods: fullMethods.map(m => m.name),
+      methodDetails: fullMethods,
+      fields: fields,
+      properties: fields.map(f => ({ name: f.name, type: f.type, annotations: f.annotations })),
+      extends: cls.extends || null,
+      implements: cls.implements || null,
+      generics: [],
+      annotations: classAnnotations.map(a => a.name),
+      javaPackage: pkg,
+    };
+  });
+
+  // Normalize interfaces
+  const interfaces = (ast.interfaces || []).map(iface => {
+    const fullMethods = extractJavaMethods(content, iface.startLine, iface.endLine);
+    const fields = extractJavaFields(content, iface.startLine, iface.endLine);
+    const ifaceAnnotations = extractAnnotations(content, Math.max(1, iface.startLine - 5), iface.startLine);
+
+    return {
+      name: iface.name,
+      startLine: iface.startLine,
+      endLine: iface.endLine,
+      methods: fullMethods.map(m => m.name),
+      methodDetails: fullMethods,
+      fields: fields,
+      properties: [],
+      extends: iface.extends || null,
+      generics: [],
+      annotations: ifaceAnnotations.map(a => a.name),
+      javaPackage: pkg,
+    };
+  });
+
+  // Normalize enums
+  const enums = (ast.enums || []).map(en => {
+    const enumAnnotations = extractAnnotations(content, Math.max(1, en.startLine - 5), en.startLine);
+    // Extract enum constants from the source
+    const openIdx = content.indexOf('{', content.indexOf('enum ' + en.name));
+    const constants = [];
+    if (openIdx >= 0) {
+      const block = content.slice(openIdx + 1, content.indexOf('}', openIdx));
+      const skipWords = new Set(['public', 'private', 'protected', 'static', 'final', 'abstract', 'class', 'interface', 'enum', 'implements', 'extends']);
+      for (const line of block.split('\n')) {
+        const trimmed = line.trim().replace(/[,;{}]$/, '').trim();
+        if (trimmed && /^\w+$/.test(trimmed) && !skipWords.has(trimmed)) {
+          constants.push(trimmed);
+        }
+      }
+    }
+
+    return {
+      name: en.name,
+      startLine: en.startLine,
+      endLine: en.endLine,
+      constants,
+      methods: [],
+      implements: null,
+      annotations: enumAnnotations.map(a => a.name),
+      javaPackage: pkg,
+    };
+  });
+
+  // Normalize functions (add annotations, javaPackage, visibility)
+  const functions = (ast.functions || []).map(fn => {
+    const fnAnnotations = extractAnnotations(content, Math.max(1, fn.startLine - 5), fn.startLine);
+    const startIdx = content.split('\n').slice(0, fn.startLine - 1).join('\n').length;
+    const prefix = content.slice(Math.max(0, startIdx - 30), startIdx);
+
+    return {
+      name: fn.name,
+      startLine: fn.startLine,
+      endLine: fn.endLine,
+      params: fn.params || [],
+      returnType: fn.returnType || 'void',
+      annotations: fnAnnotations.map(a => a.name),
+      javaPackage: pkg,
+      visibility: prefix.includes('private') ? 'private'
+        : prefix.includes('protected') ? 'protected'
+        : 'public',
+      isStatic: prefix.includes('static'),
+    };
+  });
+
+  // Global annotations
+  const allAnnotations = [];
+  const globalAnnRe = /@(\w+)/g;
+  let am;
+  while ((am = globalAnnRe.exec(content))) {
+    allAnnotations.push({ name: am[1], line: lineOf(content, am.index) });
+  }
+
+  return {
+    functions,
+    classes,
+    interfaces,
+    enums,
+    exports: ast.exports || [],
+    annotations: allAnnotations,
+    callGraph: ast.callGraph || [],
+    javaPackage: pkg,
+    parserUsed: 'tree-sitter',
+  };
 }
 
 function parseCSharp(content) {
-  return parseJavaKotlin(content); // close enough for declaration shape
+  return parseJava(content); // close enough for declaration shape
 }
 
 function parseRuby(content) {
@@ -317,7 +802,7 @@ const CODE_PARSERS = {
   python: parsePython,
   go: parseGo,
   rust: parseRust,
-  java: parseJavaKotlin, kotlin: parseJavaKotlin,
+  java: parseJava, kotlin: parseJava,
   csharp: parseCSharp,
   ruby: parseRuby,
   php: parsePHP,
@@ -477,7 +962,7 @@ function parseOpenAPI(content) {
 // Main
 // ---------------------------------------------------------------------------
 
-function analyzeFile(file, projectRoot) {
+async function analyzeFile(file, projectRoot, wasmDir) {
   const abs = join(projectRoot, file.path);
   let content;
   try { content = readFileSync(abs, 'utf-8'); }
@@ -496,6 +981,10 @@ function analyzeFile(file, projectRoot) {
     totalLines,
     nonEmptyLines,
     functions: [], classes: [], exports: [], callGraph: [],
+    interfaces: [], enums: [], annotations: [],
+    javaPackage: null,
+    parserUsed: 'regex',
+    jpaEntities: [], springEndpoints: [], springConfig: [],
     sections: [], definitions: [], services: [], endpoints: [], steps: [], resources: [],
     metrics: {},
   };
@@ -504,13 +993,128 @@ function analyzeFile(file, projectRoot) {
     const parser = CODE_PARSERS[file.language];
     if (parser) {
       try {
-        const r = parser(content);
+        // Handle async parsers (parseJava) vs sync parsers
+        const r = await parser(content, wasmDir);
         result.functions = r.functions || [];
         result.classes = r.classes || [];
         result.exports = r.exports || [];
         result.callGraph = r.callGraph || [];
+        if (r.interfaces) result.interfaces = r.interfaces;
+        if (r.enums) result.enums = r.enums;
+        if (r.annotations) result.annotations = r.annotations;
+        if (r.javaPackage) result.javaPackage = r.javaPackage;
+        if (r.parserUsed) result.parserUsed = r.parserUsed;
       } catch (e) {
         process.stderr.write(`Warning: extract-structure: ${file.path} parser failed: ${e.message}\n`);
+      }
+    }
+  }
+
+  // --- Java/Spring-specific post-processing ---
+  if (file.language === 'java') {
+    const allClasses = [...(result.classes || []), ...(result.interfaces || [])];
+    for (const cls of allClasses) {
+      const classAnnotations = cls.annotations || [];
+      const isController = classAnnotations.some(a =>
+        ['RestController', 'Controller'].includes(a)
+      );
+
+      if (isController && cls.methodDetails) {
+        let basePath = '';
+        const classAnnText = content.split('\n').slice(
+          Math.max(0, cls.startLine - 10), cls.startLine
+        ).join('\n');
+        const classMapping = classAnnText.match(/@RequestMapping\s*\(\s*(?:value\s*=\s*)?["']([^"']+)["']/);
+        if (classMapping) basePath = classMapping[1];
+
+        for (const method of cls.methodDetails) {
+          const httpMappings = [];
+          for (const ann of (method.annotations || [])) {
+            const httpMethodMap = {
+              'GetMapping': 'GET', 'PostMapping': 'POST',
+              'PutMapping': 'PUT', 'DeleteMapping': 'DELETE',
+              'PatchMapping': 'PATCH', 'RequestMapping': null,
+            };
+            const httpMethod = httpMethodMap[ann];
+
+            if (httpMethod) {
+              // Check annotation lines before the method for path
+              let methodPath = '';
+              const allLines = content.split('\n');
+              for (let i = Math.max(0, method.line - 5); i < method.line; i++) {
+                const pathMatch = allLines[i].match(/@(?:Get|Post|Put|Delete|Patch|Request)Mapping\s*\(\s*(?:value\s*=\s*)?["']([^"']+)["']/);
+                if (pathMatch) { methodPath = pathMatch[1]; break; }
+              }
+              const fullPath = (basePath + methodPath).replace(/\/+/g, '/') || '/';
+              httpMappings.push({
+                method: httpMethod || 'GET',
+                path: fullPath,
+                params: (method.params || []).map(p => p.name || p),
+              });
+            }
+          }
+
+          if (httpMappings.length > 0) {
+            result.springEndpoints.push({
+              className: cls.name,
+              methodName: method.name,
+              mappings: httpMappings,
+              annotations: method.annotations,
+              line: method.line,
+            });
+          }
+        }
+      }
+
+      const isEntity = classAnnotations.some(a => a === 'Entity');
+      if (isEntity) {
+        let tableName = cls.name;
+        const classAnnText = content.split('\n').slice(
+          Math.max(0, cls.startLine - 10), cls.startLine
+        ).join('\n');
+        const tableMatch = classAnnText.match(/@Table\s*\(\s*(?:name\s*=\s*)?["']([^"']+)["']/);
+        if (tableMatch) tableName = tableMatch[1];
+
+        result.jpaEntities.push({
+          className: cls.name,
+          tableName,
+          fields: (cls.fields || []).map(f => ({
+            name: f.name,
+            type: f.type,
+            annotations: f.annotations,
+          })),
+          line: cls.startLine,
+        });
+      }
+
+      const isConfig = classAnnotations.some(a => a === 'Configuration');
+      if (isConfig) {
+        result.springConfig.push({
+          className: cls.name,
+          beanMethods: (cls.methodDetails || [])
+            .filter(m => (m.annotations || []).includes('Bean'))
+            .map(m => ({
+              name: m.name,
+              returnType: m.returnType,
+              annotations: m.annotations,
+              line: m.line,
+            })),
+          line: cls.startLine,
+        });
+      }
+    }
+
+    for (const fn of result.functions) {
+      const fnAnnotations = fn.annotations || [];
+      const sqlAnnotations = ['Select', 'Insert', 'Update', 'Delete', 'SelectProvider', 'InsertProvider', 'UpdateProvider', 'DeleteProvider'];
+      const sqlAnnotation = fnAnnotations.find(a => sqlAnnotations.includes(a));
+      if (sqlAnnotation) {
+        const fnLine = content.split('\n')[fn.startLine - 1] || '';
+        const sqlMatch = fnLine.match(/["']([^"']+)["']/);
+        if (sqlMatch) {
+          fn.sqlQuery = sqlMatch[1];
+          fn.mybatisAnnotation = sqlAnnotation;
+        }
       }
     }
   }
@@ -542,32 +1146,39 @@ function analyzeFile(file, projectRoot) {
   result.metrics = {
     functionCount: result.functions.length,
     classCount: result.classes.length,
+    interfaceCount: result.interfaces?.length || 0,
+    enumCount: result.enums?.length || 0,
     exportCount: result.exports.length,
     serviceCount: result.services.length,
-    endpointCount: result.endpoints.length,
+    endpointCount: result.endpoints.length + (result.springEndpoints?.length || 0),
     definitionCount: result.definitions.length,
     stepCount: result.steps.length,
     resourceCount: result.resources.length,
     sectionCount: result.sections.length,
+    annotationCount: result.annotations?.length || 0,
+    jpaEntityCount: result.jpaEntities?.length || 0,
+    springConfigCount: result.springConfig?.length || 0,
   };
 
   return result;
 }
 
-function main() {
+async function main() {
   const argv = process.argv.slice(2);
   const positional = [];
   let batchIndex = null;
   let projectRootOverride = null;
+  let wasmDir = null;
   for (const a of argv) {
     if (a.startsWith('--batch=')) batchIndex = Number.parseInt(a.slice('--batch='.length), 10);
     else if (a.startsWith('--project-root=')) projectRootOverride = a.slice('--project-root='.length);
+    else if (a.startsWith('--wasm-dir=')) wasmDir = a.slice('--wasm-dir='.length);
     else positional.push(a);
   }
   const [inputPath, outputPath] = positional;
   if (!inputPath || !outputPath) {
     process.stderr.write(
-      'Usage: node extract-structure.mjs <input.json> <output.json> [--batch=<i>] [--project-root=<path>]\n' +
+      'Usage: node extract-structure.mjs <input.json> <output.json> [--batch=<i>] [--project-root=<path>] [--wasm-dir=<path>]\n' +
       '  Input may be either:\n' +
       '    (a) {projectRoot, batchFiles[]} (legacy single-batch input), or\n' +
       '    (b) full 01_code_batches.json + --batch=<i> + --project-root=<path>\n'
@@ -606,13 +1217,15 @@ function main() {
   }
 
   const results = []; const filesSkipped = [];
+  const parserCounts = { regex: 0, 'tree-sitter': 0 };
   for (const file of batchFiles) {
-    const r = analyzeFile(file, projectRoot);
+    const r = await analyzeFile(file, projectRoot, wasmDir);
     if (r.skipped) {
       filesSkipped.push(file.path);
       process.stderr.write(`Warning: extract-structure: ${file.path} skipped — ${r.reason}\n`);
       continue;
     }
+    parserCounts[r.parserUsed || 'regex']++;
     results.push(r);
   }
 
@@ -620,11 +1233,15 @@ function main() {
     scriptCompleted: true,
     filesAnalyzed: results.length,
     filesSkipped,
+    parserUsed: parserCounts,
     results,
   };
   mkdirSync(dirname(outputPath), { recursive: true });
   writeFileSync(outputPath, JSON.stringify(out, null, 2));
-  process.stderr.write(`extract-structure: filesAnalyzed=${results.length} filesSkipped=${filesSkipped.length}\n`);
+  process.stderr.write(
+    `extract-structure: filesAnalyzed=${results.length} filesSkipped=${filesSkipped.length} ` +
+    `tree-sitter=${parserCounts['tree-sitter']} regex=${parserCounts.regex}\n`
+  );
 }
 
 main();

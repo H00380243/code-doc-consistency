@@ -79,9 +79,16 @@ function extractRust(content) {
 
 function extractJavaKotlin(content) {
   const specs = [];
+  // Standard imports
   const re = /(?:^|\n)\s*import\s+(?:static\s+)?([\w.]+)(?:\.\*)?\s*;?/g;
   let m;
   while ((m = re.exec(content))) specs.push(m[1]);
+  // Spring @Import annotations (implicit dependency)
+  const importAnnRe = /@Import\s*\(\s*(?:value\s*=\s*)?(\w+\.class)/g;
+  while ((m = importAnnRe.exec(content))) {
+    const fqn = m[1].replace('.class', '');
+    if (fqn.includes('.')) specs.push(fqn);
+  }
   return specs;
 }
 
@@ -230,16 +237,76 @@ function resolveRust(spec, sourcePath, projectRoot) {
   return null;
 }
 
-function resolveJavaKotlin(spec, sourcePath, projectRoot) {
+function resolveJavaKotlin(spec, sourcePath, projectRoot, allFiles) {
   // com.foo.Bar → src/main/java/com/foo/Bar.java (or .kt)
   const path = spec.replace(/\./g, '/');
+
+  // If wildcard import, try to find all matching files in the package
+  if (spec.endsWith('.*')) {
+    const pkgPath = path.slice(0, -1); // remove trailing /
+    const found = [];
+    const prefixes = [
+      'src/main/java/', 'src/main/kotlin/',
+      'src/test/java/', 'src/test/kotlin/',
+      'src/',
+    ];
+    // Also check multi-module: */src/main/java/
+    for (const file of (allFiles || [])) {
+      for (const prefix of prefixes) {
+        if (file.path.startsWith(prefix) && file.path.includes('/' + pkgPath + '/') && file.language === 'java') {
+          found.push(file.path);
+        }
+      }
+      // Multi-module pattern: any directory/src/main/java/...
+      const multiModMatch = file.path.match(/^([^/]+)\/src\/main\/java\/(.+\.java)$/);
+      if (multiModMatch && file.language === 'java') {
+        const relPath = multiModMatch[2];
+        if (relPath.startsWith(pkgPath.replace(/\//g, '/') + '/')) {
+          found.push(file.path);
+        }
+      }
+    }
+    if (found.length > 0) return found[0]; // Return first match for edge creation
+    return null;
+  }
+
   const candidates = [
     posix.join('src/main/java', path) + '.java',
     posix.join('src/main/kotlin', path) + '.kt',
+    posix.join('src/test/java', path) + '.java',
+    posix.join('src/test/kotlin', path) + '.kt',
     posix.join('src', path) + '.java',
     posix.join('src', path) + '.kt',
   ];
+
+  // Also try multi-module paths: module-name/src/main/java/...
+  if (allFiles) {
+    const modules = new Set();
+    for (const file of allFiles) {
+      const multiModMatch = file.path.match(/^([^/]+)\/src\/main\/java\//);
+      if (multiModMatch) modules.add(multiModMatch[1]);
+    }
+    for (const mod of modules) {
+      candidates.push(posix.join(mod, 'src/main/java', path) + '.java');
+      candidates.push(posix.join(mod, 'src/main/kotlin', path) + '.kt');
+      candidates.push(posix.join(mod, 'src/test/java', path) + '.java');
+      candidates.push(posix.join(mod, 'src/test/kotlin', path) + '.kt');
+    }
+  }
+
   for (const c of candidates) if (fileExists(projectRoot, c)) return c;
+
+  // Fallback: search allFiles list for matching path
+  if (allFiles) {
+    const suffix = path + '.java';
+    const suffixKt = path + '.kt';
+    for (const file of allFiles) {
+      if (file.path.endsWith(suffix) || file.path.endsWith(suffixKt)) {
+        return file.path;
+      }
+    }
+  }
+
   return null;
 }
 

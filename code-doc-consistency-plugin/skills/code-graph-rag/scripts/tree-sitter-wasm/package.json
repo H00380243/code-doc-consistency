@@ -1,0 +1,16 @@
+{
+  "name": "code-doc-consistency-tree-sitter",
+  "version": "1.0.0",
+  "description": "Tree-sitter WASM dependencies for CDC plugin Java parsing",
+  "private": true,
+  "scripts": {
+    "setup": "node setup.mjs",
+    "check": "node tree-sitter-java.mjs --check"
+  },
+  "dependencies": {
+    "web-tree-sitter": "^0.24.0"
+  },
+  "optionalDependencies": {
+    "tree-sitter-java": "^0.23.0"
+  }
+}

@@ -50,10 +50,20 @@ node ${CLAUDE_PLUGIN_ROOT}/skills/graph-diff-analyzer/scripts/align-graphs.mjs \
 ### Layer 3: 属性层（Attribute Equivalence）
 - 对 matched 节点的属性逐一比较：
   - 函数：参数列表、返回类型、可见性
-  - 类：继承链、字段集合
-  - API：HTTP 方法、路径、请求/响应 schema
-  - 数据模型：字段名、类型、约束
+  - 类：继承链、字段集合、泛型参数
+  - Java 接口：方法签名、泛型参数
+  - Java 枚举：常量列表
+  - API：HTTP 方法、路径、请求/响应 schema（对比 @RequestMapping 路径与 OpenAPI 路径）
+  - 数据模型：字段名、类型、约束（对比 @Entity 字段与文档中的数据模型）
+  - JPA 实体：表名、列映射（对比 @Table/@Column 与文档中的数据库设计）
+  - Spring 配置：Bean 定义、Profile 配置
+  - MyBatis Mapper：SQL 语句与文档中的查询描述
 - 标注每个属性的 `code_value` vs `doc_value`
+- Java/Spring 特有检查：
+  - @RestController 路径是否与 OpenAPI 文档端点匹配
+  - @Entity 表名是否与文档中的数据库表名匹配
+  - @Service/@Repository 注解是否存在（架构分层是否符合设计）
+  - 接口实现关系是否与文档中的依赖描述一致
 
 ### Layer 4: 行为层（Behavioral / Flow）
 - 对文档中的流程/场景描述（用例、状态机、时序），抽取关键步骤序列

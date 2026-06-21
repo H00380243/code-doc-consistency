@@ -14,6 +14,8 @@ description: "代码侧有向图 RAG 的 coordinator。负责确定性阶段：S
 ```
 本 agent (coordinator):
   ① SCAN       脚本：scan-project.mjs + extract-import-map.mjs
+  ①.5 POM     脚本：parse-pom.mjs（仅 Java/Maven 项目）
+  ①.6 CONFIG  脚本：parse-spring-config.mjs（仅 Spring Boot 项目）
   ② BATCH      脚本：compute-batches.mjs   →  01_code_batches.json
   ③ ANALYZE-prep 脚本：extract-structure.mjs (per batch)  →  01_code_extract_<i>.json[]
   ↓ 把 batches[] 信息交给 orchestrator
@@ -42,6 +44,35 @@ node ${CLAUDE_PLUGIN_ROOT}/skills/code-graph-rag/scripts/extract-import-map.mjs 
 ```
 
 输出 `01_code_scan.json`：files[] + 语言/分类 + importMap。
+
+### Phase 1.5: POM 解析（仅 Java/Maven 项目）
+
+如果项目包含 `pom.xml`，运行 Maven 模块解析：
+
+```bash
+node ${CLAUDE_PLUGIN_ROOT}/skills/code-graph-rag/scripts/parse-pom.mjs \
+  "$WORKSPACE/00_input/inputs.json" \
+  "$WORKSPACE/01_pom_info.json"
+```
+
+输出 `01_pom_info.json`：项目坐标、模块列表、依赖、Spring Boot starters、frameworks 检测结果。
+此信息用于：
+- 确定多模块项目结构（影响 import 解析路径）
+- 检测 Spring Boot 框架（影响 ANALYZE 阶段的规则选择）
+- 识别技术栈（MyBatis/JPA/gRPC 等）
+
+### Phase 1.6: Spring 配置分析（仅 Spring Boot 项目）
+
+如果 `01_pom_info.json` 检测到 Spring Boot，运行配置分析：
+
+```bash
+node ${CLAUDE_PLUGIN_ROOT}/skills/code-graph-rag/scripts/parse-spring-config.mjs \
+  "$WORKSPACE/00_input/inputs.json" \
+  "$WORKSPACE/01_spring_config.json"
+```
+
+输出 `01_spring_config.json`：数据源、Redis、安全、消息队列、服务器配置等基础设施信息。
+此信息用于辅助 worker 理解项目的基础设施依赖。
 
 ### Phase 2: BATCH（确定性）
 

@@ -1,6 +1,6 @@
 ---
 description: Detect inconsistencies between source code and design documents
-argument-hint: "[code-path] [--docs=<path>] [--config=<path>] [--focus=<pattern>] [--aliases=<path>] [--full|--review|--checker-only]"
+argument-hint: "[code-path] [--docs=<path>] [--config=<path>] [--focus=<pattern>] [--aliases=<path>] [--model-tier=economy|standard|premium] [--full|--review|--checker-only]"
 ---
 
 # /cdc — Code-Doc Consistency Check
@@ -29,6 +29,7 @@ This command invokes the `code-doc-consistency-orchestrator` skill, which:
 | `--focus=<pattern>` | Limit diff to these node/edge types (e.g. `endpoint,routes_to,defines_schema` for API-only). |
 | `--aliases=<path>` | Path to alias map JSON for cross-graph node alignment. |
 | `--scope=<sub-path>` | Further sub-path filter applied within the code root. |
+| `--model-tier=<tier>` | Override model selection for all agents. Options: `economy` (all Sonnet), `standard` (default), `premium` (all Opus). Also supports per-role: `--model-tier=code-batch-analyzer=economy,consistency-checker=standard`. |
 | `--full` | Force full rebuild, ignoring existing `_workspace/`. |
 | `--review` | Re-run only `graph-reviewer` and `consistency-checker` against existing graphs. |
 | `--checker-only` | Re-run only `consistency-checker`; preserves both graphs and the review. Useful with new `--focus` or `--aliases`. |

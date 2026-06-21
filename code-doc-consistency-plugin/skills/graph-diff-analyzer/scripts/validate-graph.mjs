@@ -20,6 +20,10 @@ const VALID_NODE_TYPES = new Set([
   'config', 'document', 'service', 'table', 'endpoint',
   'pipeline', 'schema', 'resource',
   'domain', 'flow', 'step',
+  // Java/Spring types (v2.0)
+  'interface', 'annotation', 'enum', 'configuration', 'test',
+  'entity', 'mapper', 'message_consumer', 'message_producer',
+  'cache_config', 'security_filter', 'discovery_client', 'grpc_service',
 ]);
 
 const VALID_EDGE_TYPES = new Set([
@@ -31,6 +35,15 @@ const VALID_EDGE_TYPES = new Set([
   'deploys', 'serves', 'provisions', 'triggers',
   'migrates', 'documents', 'routes', 'defines_schema',
   'contains_flow', 'flow_step', 'cross_domain',
+  // Java/Spring edges (v2.0)
+  'implements_interface', 'overrides', 'throws_exception', 'declares',
+  'autowires', 'injects', 'configures_bean',
+  'exposes_endpoint', 'annotated_with',
+  'maps_to_table', 'maps_to_column', 'defines_mapper',
+  'consumes_message', 'produces_message',
+  'caches', 'secures',
+  'discovers_service',
+  'implements_grpc',
 ]);
 
 const VALID_DIRECTIONS = new Set(['forward', 'backward', 'bidirectional']);
@@ -87,6 +100,90 @@ function validateNode(node, idx) {
   if (node.confidence != null && !VALID_CONFIDENCE.has(node.confidence)) {
     issues.push({ node_id: nid, field: 'confidence', issue: `invalid: ${node.confidence}` });
   }
+
+  // ── Java/Spring-specific field validation (v2.0) ──────────────────────
+  if (node.annotations != null) {
+    if (!Array.isArray(node.annotations)) {
+      issues.push({ node_id: nid, field: 'annotations', issue: 'not an array' });
+    } else {
+      for (let i = 0; i < node.annotations.length; i++) {
+        if (typeof node.annotations[i] !== 'string') {
+          issues.push({ node_id: nid, field: `annotations[${i}]`, issue: 'not a string' });
+        }
+      }
+    }
+  }
+  if (node.java_package != null) {
+    if (typeof node.java_package !== 'string') {
+      issues.push({ node_id: nid, field: 'java_package', issue: 'not a string' });
+    } else if (!/^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)*$/.test(node.java_package)) {
+      issues.push({ node_id: nid, field: 'java_package', issue: `invalid package name: "${node.java_package}"`, severity: 'quality' });
+    }
+  }
+  if (node.http_mappings != null) {
+    if (!Array.isArray(node.http_mappings)) {
+      issues.push({ node_id: nid, field: 'http_mappings', issue: 'not an array' });
+    } else {
+      const validMethods = new Set(['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS']);
+      for (let i = 0; i < node.http_mappings.length; i++) {
+        const m = node.http_mappings[i];
+        if (typeof m !== 'object' || m === null) {
+          issues.push({ node_id: nid, field: `http_mappings[${i}]`, issue: 'not an object' });
+        } else {
+          if (m.method && !validMethods.has(m.method)) {
+            issues.push({ node_id: nid, field: `http_mappings[${i}].method`, issue: `invalid HTTP method: "${m.method}"` });
+          }
+          if (m.path && typeof m.path !== 'string') {
+            issues.push({ node_id: nid, field: `http_mappings[${i}].path`, issue: 'not a string' });
+          }
+        }
+      }
+    }
+  }
+  if (node.jpa_table != null && typeof node.jpa_table !== 'string') {
+    issues.push({ node_id: nid, field: 'jpa_table', issue: 'not a string' });
+  }
+  if (node.jpa_columns != null) {
+    if (!Array.isArray(node.jpa_columns)) {
+      issues.push({ node_id: nid, field: 'jpa_columns', issue: 'not an array' });
+    } else {
+      for (let i = 0; i < node.jpa_columns.length; i++) {
+        const col = node.jpa_columns[i];
+        if (typeof col !== 'object' || col === null) {
+          issues.push({ node_id: nid, field: `jpa_columns[${i}]`, issue: 'not an object' });
+        } else if (!col.name || typeof col.name !== 'string') {
+          issues.push({ node_id: nid, field: `jpa_columns[${i}].name`, issue: 'missing or not a string' });
+        }
+      }
+    }
+  }
+  if (node.spring_scope != null && typeof node.spring_scope !== 'string') {
+    issues.push({ node_id: nid, field: 'spring_scope', issue: 'not a string' });
+  }
+  if (node.mybatis_result_map != null && typeof node.mybatis_result_map !== 'string') {
+    issues.push({ node_id: nid, field: 'mybatis_result_map', issue: 'not a string' });
+  }
+  if (node.sql_query != null && typeof node.sql_query !== 'string') {
+    issues.push({ node_id: nid, field: 'sql_query', issue: 'not a string' });
+  }
+  if (node.security_rules != null) {
+    if (typeof node.security_rules !== 'object' || Array.isArray(node.security_rules)) {
+      issues.push({ node_id: nid, field: 'security_rules', issue: 'not an object' });
+    }
+  }
+  if (node.cache_keys != null && !Array.isArray(node.cache_keys)) {
+    issues.push({ node_id: nid, field: 'cache_keys', issue: 'not an array' });
+  }
+  if (node.message_binding != null && typeof node.message_binding !== 'string') {
+    issues.push({ node_id: nid, field: 'message_binding', issue: 'not a string' });
+  }
+  if (node.maven_module != null && typeof node.maven_module !== 'string') {
+    issues.push({ node_id: nid, field: 'maven_module', issue: 'not a string' });
+  }
+  if (node.grpc_method != null && typeof node.grpc_method !== 'string') {
+    issues.push({ node_id: nid, field: 'grpc_method', issue: 'not a string' });
+  }
+
   return issues;
 }
 

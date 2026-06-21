@@ -29,6 +29,10 @@ const VALID_PREFIXES = new Set([
   'config', 'document', 'service', 'table', 'endpoint',
   'pipeline', 'schema', 'resource',
   'domain', 'flow', 'step',
+  // Java/Spring types (v2.0)
+  'interface', 'annotation', 'enum', 'configuration', 'test',
+  'entity', 'mapper', 'message_consumer', 'message_producer',
+  'cache_config', 'security_filter', 'discovery_client', 'grpc_service',
 ]);
 
 const COMPLEXITY_MAP = {

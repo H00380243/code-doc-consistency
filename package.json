@@ -1,0 +1,13 @@
+{
+  "name": "code-doc-consistency-tests",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/test-java-scripts.mjs",
+    "test:verbose": "node --test --test-reporter spec tests/test-java-scripts.mjs"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

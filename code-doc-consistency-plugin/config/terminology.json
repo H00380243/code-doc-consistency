@@ -1,0 +1,131 @@
+{
+  "version": "1.0.0",
+  "description": "CDC Pipeline terminology glossary — shared across all agents and skills for consistent language",
+  "terms": {
+    "graph": {
+      "definition": "A directed graph with typed nodes and weighted edges, representing either code structure or documentation structure",
+      "synonyms": ["有向图", "知识图谱"],
+      "usedBy": ["code-graph-builder", "doc-graph-builder", "graph-reviewer", "consistency-checker"]
+    },
+    "node": {
+      "definition": "An entity in the graph (e.g., function, class, service, concept, endpoint)",
+      "synonyms": ["vertex", "实体", "节点"],
+      "schema": "See graph-schema.md for 29 valid node types",
+      "usedBy": ["all agents"]
+    },
+    "edge": {
+      "definition": "A directed relationship between two nodes (e.g., calls, implements, documents)",
+      "synonyms": ["relation", "关系", "边"],
+      "schema": "See graph-schema.md for 44 valid edge types",
+      "usedBy": ["all agents"]
+    },
+    "batch": {
+      "definition": "A subset of files grouped for parallel LLM processing; each batch becomes one worker task",
+      "synonyms": ["批次", "分片"],
+      "createdBy": "compute-batches.mjs",
+      "usedBy": ["code-graph-builder", "code-batch-analyzer"]
+    },
+    "worker": {
+      "definition": "An LLM subagent that processes a single batch (code-batch-analyzer) or document (doc-freetext-analyzer)",
+      "synonyms": ["子代理", "工作线程"],
+      "usedBy": ["orchestrator", "coordinators"]
+    },
+    "coordinator": {
+      "definition": "An agent that orchestrates deterministic phases (scripts) and delegates LLM phases to workers",
+      "synonyms": ["协调器", "编排者"],
+      "usedBy": ["orchestrator"]
+    },
+    "orchestrator": {
+      "definition": "The top-level skill/workflow that coordinates the entire pipeline",
+      "synonyms": ["调度器", "主流程"],
+      "usedBy": ["/cdc command"]
+    },
+    "side": {
+      "definition": "Which graph we're talking about: 'code' (source code) or 'doc' (design documents)",
+      "synonyms": ["侧", "维度"],
+      "values": ["code", "doc"],
+      "usedBy": ["all agents"]
+    },
+    "alignment": {
+      "definition": "The process of matching nodes across code and doc graphs to find correspondences",
+      "synonyms": ["对齐", "匹配", "对应"],
+      "tiers": ["Tier 1: exact ID match", "Tier 2: user aliases", "Tier 3: token similarity", "Tier 4: fuzzy overlap"],
+      "createdBy": "align-graphs.mjs",
+      "usedBy": ["consistency-checker"]
+    },
+    "consistency": {
+      "definition": "The degree to which code and documentation agree on entities, relationships, attributes, and behavior",
+      "synonyms": ["一致性", "符合度"],
+      "layers": ["entity existence", "relationship coverage", "attribute drift", "behavior divergence"],
+      "usedBy": ["consistency-checker"]
+    },
+    "diff": {
+      "definition": "A structured difference between code and doc graphs, classified by type and severity",
+      "synonyms": ["差异", "偏差"],
+      "types": ["missing", "extra", "conflict", "drift"],
+      "severities": ["critical", "major", "minor"],
+      "usedBy": ["consistency-checker"]
+    },
+    "drift": {
+      "definition": "A difference where both sides have the same entity but attributes have diverged over time",
+      "synonyms": ["漂移", "偏移"],
+      "usedBy": ["consistency-checker"]
+    },
+    "coverage": {
+      "definition": "What percentage of code entities have corresponding doc entries (and vice versa)",
+      "synonyms": ["覆盖率", "覆盖度"],
+      "usedBy": ["graph-reviewer", "consistency-checker"]
+    },
+    "summary": {
+      "definition": "A 1-3 sentence natural language description of a node's purpose and behavior",
+      "synonyms": ["摘要", "描述"],
+      "qualityRule": "Must be >10 chars, not equal to name or file path",
+      "usedBy": ["all agents"]
+    },
+    "tags": {
+      "definition": "lowercase-hyphenated labels for categorizing nodes (e.g., 'rest-api', 'data-access')",
+      "synonyms": ["标签", "分类"],
+      "format": "lowercase-hyphenated (e.g., rest-api, not REST_API)",
+      "usedBy": ["all agents"]
+    },
+    "confidence": {
+      "definition": "A label indicating how reliable a node/edge/alignment is (high/medium/low)",
+      "synonyms": ["置信度", "可信度"],
+      "values": ["high", "medium", "low"],
+      "usedBy": ["all agents"]
+    },
+    "symbol_index": {
+      "definition": "A global index of all exported symbols across code files, used for cross-file resolution",
+      "synonyms": ["符号索引", "符号表"],
+      "createdBy": "build-symbol-index.mjs",
+      "usedBy": ["code-batch-analyzer workers"]
+    },
+    "workspace": {
+      "definition": "The _workspace directory under the project root where all intermediate pipeline artifacts are stored",
+      "synonyms": ["工作区", "暂存区"],
+      "path": "$PROJECT_ROOT/_workspace",
+      "usedBy": ["all agents"]
+    },
+    "artifact": {
+      "definition": "Any intermediate or final JSON file produced by a pipeline phase",
+      "synonyms": ["产物", "输出文件"],
+      "naming": "NN_phase_description.json (e.g., 01_code_scan.json, 03_alignment.json)",
+      "usedBy": ["all agents"]
+    }
+  },
+  "phaseNames": {
+    "SCAN": "File enumeration + import resolution",
+    "POM": "Maven POM parsing (Java only)",
+    "CONFIG": "Spring config parsing (Spring Boot only)",
+    "BATCH": "Semantic file grouping for parallel processing",
+    "ANALYZE": "LLM semantic synthesis per batch/document",
+    "MERGE": "Batch graph consolidation + dedup",
+    "REVIEW": "Schema + quality QA check",
+    "ALIGN": "Cross-graph node matching",
+    "DIFF": "Multi-layer consistency comparison"
+  },
+  "languageNotes": {
+    "english": "Use English for all script variable names, JSON keys, and code. Use Chinese in agent prompt prose for readability.",
+    "chinese": "Agent prompts use Chinese prose (中文说明) but English technical terms (e.g., 'batch', 'worker', 'coordinator') are kept in English for precision."
+  }
+}

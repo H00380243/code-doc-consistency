@@ -1,0 +1,52 @@
+{
+  "description": "Model tier configuration for code-doc-consistency pipeline. Controls which LLM model is used for each agent role.",
+  "tiers": {
+    "economy": {
+      "model": "sonnet",
+      "description": "Fast, cost-effective model for deterministic tasks that only call scripts"
+    },
+    "standard": {
+      "model": "sonnet",
+      "description": "Balanced model for moderately complex semantic tasks"
+    },
+    "premium": {
+      "model": "opus",
+      "description": "Most capable model for complex reasoning and deep analysis"
+    }
+  },
+  "agent_models": {
+    "code-graph-builder": {
+      "tier": "economy",
+      "reason": "Coordinator that only calls scripts; no LLM reasoning needed"
+    },
+    "doc-graph-builder": {
+      "tier": "economy",
+      "reason": "Coordinator that only calls scripts; no LLM reasoning needed"
+    },
+    "code-batch-analyzer": {
+      "tier": "premium",
+      "reason": "Requires deep understanding of code semantics, cross-batch calls, and business logic"
+    },
+    "doc-freetext-analyzer": {
+      "tier": "standard",
+      "reason": "Free-text entity extraction is moderate complexity; Sonnet is sufficient"
+    },
+    "graph-reviewer": {
+      "tier": "economy",
+      "reason": "Schema validation and integrity checks are rule-based, not semantic"
+    },
+    "consistency-checker": {
+      "tier": "premium",
+      "reason": "Four-layer diff requires deep semantic alignment, especially Layer 4 behavioral/flow comparison"
+    }
+  },
+  "overrides": {
+    "_comment": "Environment variable or CLI overrides. Set CDC_MODEL_TIER=<role>=<tier> to override.",
+    "CI_ECONOMY": {
+      "code-batch-analyzer": "standard",
+      "doc-freetext-analyzer": "economy",
+      "consistency-checker": "standard",
+      "description": "CI cost-saving mode: downgrade all agents to save tokens"
+    }
+  }
+}
